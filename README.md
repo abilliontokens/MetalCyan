@@ -6,8 +6,9 @@ Lilu plugin that does that patching. It started as a fork of [NootedRed](https:/
 
 ![System Information](docs/images/system-information.jpg)
 
-Tested on macOS Tahoe 26.7.1 (MacPro7,1 SMBIOS, OpenCore 1.0.8). The work started on Sonoma 14.8.9, and the code
-still has its patterns, but Sonoma hasn't been retested since. One board so far.
+> [!IMPORTANT]
+> MetalCyan's patches are matched to **macOS Tahoe 26.7.1** with the **MacPro7,1** SMBIOS (OpenCore 1.0.8). Other
+> macOS versions and other SMBIOS models aren't supported.
 
 For a complete EFI, see [BC-250-Hackintosh-OpenCore](https://github.com/amethyst8118/BC-250-Hackintosh-OpenCore).
 
@@ -33,6 +34,7 @@ For a complete EFI, see [BC-250-Hackintosh-OpenCore](https://github.com/amethyst
 
 ## Requirements
 
+- macOS Tahoe 26.7.1, MacPro7,1 SMBIOS.
 - BIOS: UMA frame buffer (VRAM) at **4 GB**. With the default 512 MB the GPU runs out of memory and freezes on a
   green screen.
 - [Lilu](https://github.com/acidanthera/Lilu) 1.7 or newer, loaded before MetalCyan.
@@ -65,8 +67,7 @@ always get to the desktop and take it out again. If the SMU stops responding (te
 clock), remove the setting and power off for 10 seconds. A restart isn't enough.
 
 What one board runs daily, with the 8-core unlock: `bc250cu=40 bc250gfxmhz=2000 bc250gfxmv=1080 bc250cpumhz=4000
-bc250cpuvmax=1300`. That held 15 minutes of 12-thread SHA/AES load plus a RAM write/verify loop at 80.8 °C. A 1250 mV
-ceiling at 4000 MHz was stable on 6 cores but hung within seconds on 8. Every board is different; start lower.
+bc250cpuvmax=1300`.
 
 ## Logs
 
