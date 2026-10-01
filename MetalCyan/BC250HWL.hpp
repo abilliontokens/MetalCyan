@@ -92,13 +92,11 @@ public:
 
     void processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size);
 
-    // Level 28: reads the IH ring beside the framebuffer's interrupt manager (from the log thread, every 0.2 s).
-    void ihPoll();
+    // Keeps SDMA1's trap enabled as SDMA0's (from the poll thread, every 0.2 s).
+    void sdma1TrapPoll();
 
-    // Level 28 (28z8): the flight recorder's last GPU-memory/submission events as text; returns the length.
-    size_t flightDump(char* out, size_t capacity);
 
     // IOGraphicsAccelerator2's orphaned-VRAM handling (from the SMU thread, every second): VRAM reuse off once the
-    // accelerator exists (bc250vramreuse=1 keeps it), and a pool log every 10 calls.
+    // accelerator exists (bc250vramreuse=1 keeps it).
     void accelPoolTick();
 };

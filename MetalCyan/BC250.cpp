@@ -21,53 +21,11 @@
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread.h>
-#include <sys/errno.h>
-#include <sys/fcntl.h>
-#include <sys/mount.h>
 #include <sys/sysctl.h>
-#include <sys/vnode.h>
-#include <sys/uio.h>
-#include <sys/vnode_if.h>
 
 static BC250 moduleInstance;
 
-// -- Register access for bring-up (root only) --
-//
-//   sysctl -w debug.bc250.addr=<dword index>; sysctl debug.bc250.reg        # read MMIO
-//   sysctl -w debug.bc250.addr=<dword index> debug.bc250.reg=<value>        # write MMIO
-//   sysctl -w debug.bc250.smnaddr=<byte address>; sysctl debug.bc250.smn    # read SMN (PCIE_INDEX2/DATA2)
-//
-// scripts/bc250-regs.py wraps this with register names.
-
-static UInt32 sysctlRegAddr = 0;
-static UInt32 sysctlSmnAddr = 0;
-
-static int sysctlHandleReg(struct sysctl_oid* oidp, void*, int, struct sysctl_req* req)
-{
-    auto& nred = NRed::singleton();
-    if (static_cast<UInt64>(sysctlRegAddr) * sizeof(UInt32) >= nred.getMMIOLength()) { return EINVAL; }
-    int value = static_cast<int>(nred.readReg32(sysctlRegAddr));
-    const int err = sysctl_handle_int(oidp, &value, 0, req);
-    if (err != 0 || req->newptr == USER_ADDR_NULL) { return err; }
-    nred.writeReg32(sysctlRegAddr, static_cast<UInt32>(value));
-    return 0;
-}
-
-static int sysctlHandleSmn(struct sysctl_oid* oidp, void*, int, struct sysctl_req* req)
-{
-    auto& nred = NRed::singleton();
-    if (nred.getMMIOLength() == 0) { return ENODEV; }
-    int value = static_cast<int>(nred.readSMN32(sysctlSmnAddr));
-    return sysctl_handle_int(oidp, &value, 0, req);
-}
-
-SYSCTL_NODE(_debug, OID_AUTO, bc250, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "BC-250 register access");
-SYSCTL_UINT(_debug_bc250, OID_AUTO, addr, CTLFLAG_RW | CTLFLAG_LOCKED, &sysctlRegAddr, 0, "MMIO dword index");
-SYSCTL_PROC(_debug_bc250, OID_AUTO, reg, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, sysctlHandleReg, "IU",
-            "MMIO register at addr");
-SYSCTL_UINT(_debug_bc250, OID_AUTO, smnaddr, CTLFLAG_RW | CTLFLAG_LOCKED, &sysctlSmnAddr, 0, "SMN byte address");
-SYSCTL_PROC(_debug_bc250, OID_AUTO, smn, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0, sysctlHandleSmn, "IU",
-            "SMN register at smnaddr");
+SYSCTL_NODE(_debug, OID_AUTO, bc250, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "BC-250");
 
 static char         bc250Log[1024 * 1024];
 static volatile SInt32 bc250LogPos = 0;
@@ -97,97 +55,23 @@ static int sysctlHandleLog(struct sysctl_oid*, void*, int, struct sysctl_req* re
 SYSCTL_PROC(_debug_bc250, OID_AUTO, log, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0, sysctlHandleLog, "A",
             "BC-250 log since boot");
 
-// -- Log to disk (survey level 28 on; bc250flush=0 disables) --
-//
-// Level 28's hangs take the machine down ~32 s after boot, before sshd answers and before logd persists anything, and
-// the in-memory log above dies with them. A kernel thread of its own writes the log, when it grew, every 0.2 s to
-// /private/var/log/bc250.<0|1>.log (alternating, so a crash during a write leaves the previous copy whole) with
-// IO_SYNC. Every 10th write logs a heartbeat, so the log shows when writing stopped. Until the data volume is
-// writable the open fails and is retried.
-static SInt32  bc250Flushed      = 0;
-static UInt32  bc250FlushCount   = 0;
-static errno_t bc250FlushLastErr = 0;
-
-static errno_t bc250WriteBuffer(const char* path, const char* data, SInt32 len);
-
-static errno_t bc250WriteLog(const char* path, SInt32 len) { return bc250WriteBuffer(path, bc250Log, len); }
-
-static errno_t bc250WriteBuffer(const char* path, const char* data, SInt32 len)
+// SDMA1's trap enable follows SDMA0's (BC250HWL::sdma1TrapPoll), checked every 0.2 s on a thread of its own.
+static void bc250PollThread(void*, wait_result_t)
 {
-    vnode_t vp  = NULLVP;
-    auto    ctx = vfs_context_create(nullptr);
-    errno_t err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
-    if (err == 0) {
-        auto* uio = uio_create(1, 0, UIO_SYSSPACE, UIO_WRITE);
-        if (uio == nullptr) {
-            err = ENOMEM;
-        }
-        else {
-            err = uio_addiov(uio, CAST_USER_ADDR_T(data), static_cast<user_size_t>(len));
-            if (err == 0) { err = VNOP_WRITE(vp, uio, IO_SYNC, ctx); }
-            if (err == 0) {
-                // O_TRUNC did not shorten the file on the board (a longer earlier boot's tail stayed): set the size.
-                struct vnode_attr va;
-                VATTR_INIT(&va);
-                VATTR_SET(&va, va_data_size, static_cast<off_t>(len));
-                vnode_setattr(vp, &va, ctx);
-            }
-            uio_free(uio);
-        }
-        vnode_close(vp, FWASWRITTEN, ctx);
-    }
-    vfs_context_rele(ctx);
-    return err;
-}
-
-static void bc250FlushThread(void*, wait_result_t)
-{
-    IOSleep(2000);
     while (true) {
-        auto len = bc250LogPos;
-        if (len >= static_cast<SInt32>(sizeof(bc250Log))) { len = sizeof(bc250Log) - 1; }
-        if (len != bc250Flushed) {
-            const char* path = (bc250FlushCount & 1) ? "/private/var/log/bc250.1.log" : "/private/var/log/bc250.0.log";
-            const auto  err  = bc250WriteLog(path, len);
-            if (err == 0) {
-                if (bc250FlushCount % 10 == 0) {
-                    BCLOG("BC250", "Log to disk: write %u to %s (%d bytes)", bc250FlushCount, path, len);
-                }
-                bc250Flushed = len;
-                bc250FlushCount++;
-            }
-            else if (err != bc250FlushLastErr) {
-                BCLOG("BC250", "Log to disk: %s not written (error %d), retried", path, err);
-            }
-            bc250FlushLastErr = err;
-        }
-        BC250HWL::singleton().ihPoll();
-        // 28z8: the flight recorder's last events, rewritten whenever they changed.
-        {
-            static char   flightText[256 * 1024];
-            static size_t flightLast = 0;
-            const size_t  flightLen  = BC250HWL::singleton().flightDump(flightText, sizeof(flightText));
-            if (flightLen != 0 && flightLen != flightLast) {
-                if (bc250WriteBuffer("/private/var/log/bc250.flight.log", flightText, static_cast<SInt32>(flightLen)) ==
-                    0)
-                {
-                    flightLast = flightLen;
-                }
-            }
-        }
+        BC250HWL::singleton().sdma1TrapPoll();
         IOSleep(200);
     }
 }
 
-static void bc250StartLogFlush()
+static void bc250StartPollThread()
 {
     static bool started = false;
     if (started) { return; }
     thread_t thread = nullptr;
-    if (kernel_thread_start(bc250FlushThread, nullptr, &thread) != KERN_SUCCESS) { return; }
+    if (kernel_thread_start(bc250PollThread, nullptr, &thread) != KERN_SUCCESS) { return; }
     thread_deallocate(thread);
     started = true;
-    BCLOG("BC250", "Log to disk: every 0.2 s to /private/var/log/bc250.<0|1>.log (bc250flush=0 disables)");
 }
 
 static void registerSysctls()
@@ -196,10 +80,6 @@ static void registerSysctls()
     if (registered) { return; }
     registered = true;
     sysctl_register_oid(&sysctl__debug_bc250);
-    sysctl_register_oid(&sysctl__debug_bc250_addr);
-    sysctl_register_oid(&sysctl__debug_bc250_reg);
-    sysctl_register_oid(&sysctl__debug_bc250_smnaddr);
-    sysctl_register_oid(&sysctl__debug_bc250_smn);
     sysctl_register_oid(&sysctl__debug_bc250_log);
 }
 
@@ -312,11 +192,7 @@ void BC250::processPatcher()
     }
     this->hwlSurvey = this->mode == Mode::Framebuffer;
     this->hwlLevel  = 28;
-    if (this->hwlSurvey) {
-        UInt32 flush = 1;
-        PE_parse_boot_argn("bc250flush", &flush, sizeof(flush));
-        if (flush != 0) { bc250StartLogFlush(); }
-    }
+    if (this->hwlSurvey) { bc250StartPollThread(); }
 
     // SMU telemetry (read-only messages; bc250smu=0 disables): GPU/CPU clocks, voltages, Tctl, core mask.
     BC250Smu::singleton().start();

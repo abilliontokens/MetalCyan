@@ -35,306 +35,52 @@ namespace
         Accel,
     };
 
-    constexpr UInt8 kNever = 0xFF;
-
+    // Hooks on Apple's functions that either block a step (Navi 10 paths that would hang or misprogram the BC-250) or
+    // change something around it; all share one pass-through (wrap<I>).
     struct Hook
     {
         Kext              kext;
         const char*       name;
         const char*       symbol;
-        UInt8             runFrom;     // Run from this survey level on; below it, return 0 without running.
-        bool              logClass;    // Also log the class of the returned object.
+        bool              block;    // Return 0 without running Apple's function.
         mach_vm_address_t org;
         UInt32            calls;
     };
 
     Hook hooks[] = {
-        {Kext::HWServices, "HWServices::probe", "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract5probeEP9IOServicePi",
-            0, true, 0, 0},
-        {Kext::HWServices, "HWServices::start", "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract5startEP9IOService", 0,
-            false, 0, 0},
-        {Kext::HWServices, "HWServices::findPlugIn", "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract10findPlugInEv",
-            0, true, 0, 0},
-        {Kext::HWServices, "HWServices::readProjectName",
-            "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract15readProjectNameEv", 0, false, 0, 0},
-        {Kext::HWServices, "HWServices::populateDeviceInfo",
-            "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract18populateDeviceInfoEPNS_10DeviceInfoE", 0, false, 0, 0},
-        {Kext::HWServices, "HWServicesNavi::getMatchProperty",
-            "__ZN38AMDRadeonX6000_AMDRadeonHWServicesNavi16getMatchPropertyEv", 0, false, 0, 0},
-        {Kext::HWServices, "HWServices::getCail", "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract7getCailEv", 0,
-            false, 0, 0},
-        {Kext::HWServices, "HWServices::getTtl", "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract6getTtlEv", 0, false,
-            0, 0},
-        {Kext::HWServices, "HWServicesSWIP::createTtlInterface",
-            "__ZN38AMDRadeonX6000_AMDRadeonHWServicesSWIP18createTtlInterfaceEP11IOPCIDevice", 2, false, 0, 0},
+        // PowerPlay talks to the SMU with Navi 10's message set, which the BC-250's SMU 11.0.8 reads differently.
         {Kext::HWServices, "HWServices::createPowerPlayInterface",
-            "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract24createPowerPlayInterfaceEP18PowerPlayCallbacks",
-            kNever, false, 0, 0},
-        {Kext::HWLibs, "HWLibs::probe", "__ZN30AMDRadeonX6000_AMDRadeonHWLibs5probeEP9IOServicePi", 0, true, 0, 0},
-        {Kext::HWLibs, "HWLibs::start", "__ZN30AMDRadeonX6000_AMDRadeonHWLibs5startEP9IOService", 0, false, 0, 0},
-        {Kext::HWLibs, "HWLibsSWIP::start", "__ZN34AMDRadeonX6000_AMDRadeonHWLibsSWIP5startEP9IOService", 0, false, 0,
+            "__ZN42AMDRadeonX6000_AMDRadeonHWServicesAbstract24createPowerPlayInterfaceEP18PowerPlayCallbacks", true, 0,
             0},
-        {Kext::HWLibs, "HWLibsX6000::populateFirmwareDirectory",
-            "__ZN35AMDRadeonX6000_AMDRadeonHWLibsX600025populateFirmwareDirectoryEv", 0, false, 0, 0},
-        {Kext::HWLibs, "HWLibsSWIP::createTtlInterface",
-            "__ZN34AMDRadeonX6000_AMDRadeonHWLibsSWIP18createTtlInterfaceEP11IOPCIDevice", 2, false, 0, 0},
         {Kext::HWLibs, "HWLibs::createPowerPlayInterface",
-            "__ZN30AMDRadeonX6000_AMDRadeonHWLibs24createPowerPlayInterfaceEP18PowerPlayCallbacks", kNever, false, 0,
-            0},
-        {Kext::FB, "Controller::findHwServices", "__ZNK34AMDRadeonX6000_AmdRadeonController14findHwServicesEv", 3,
-            false, 0, 0},
-        {Kext::FB, "Controller::setupHwServices", "__ZN34AMDRadeonX6000_AmdRadeonController15setupHwServicesEv", 0,
-            false, 0, 0},
-        {Kext::FB, "BiosParserHelper::initializeHwServices",
-            "__ZN34AMDRadeonX6000_AmdBiosParserHelper20initializeHwServicesEv", 0, false, 0, 0},
-        {Kext::FB, "BiosParserHelper::executeCommandTable",
-            "__ZN34AMDRadeonX6000_AmdBiosParserHelper19executeCommandTableEjPv", 0, false, 0, 0},
-        // Level 28: the steps of AmdRadeonController::powerUp (routed by X6000FB, which logs its result). With the
-        // accelerator registered (level 25 on) the display is never detected (no DAL mode set, CoreDisplay sees no
-        // device); a failing step makes powerUp return before detectAllDisplays/establishBootDisplay. setupCursors
-        // and createLinks are left alone (X6000FB patches their code).
-        {Kext::FB, "BiosParserHelper::powerUp", "__ZN34AMDRadeonX6000_AmdBiosParserHelper7powerUpEv", 0, false, 0, 0},
-        {Kext::FB, "BiosParserHelper::initializeDmcuB", "__ZN34AMDRadeonX6000_AmdBiosParserHelper15initializeDmcuBEy",
-            0, false, 0, 0},
-        {Kext::FB, "BiosParserHelper::initializeDisplayController",
-            "__ZN34AMDRadeonX6000_AmdBiosParserHelper27initializeDisplayControllerEv", 0, false, 0, 0},
-        {Kext::FB, "AsicInfo::refresh", "__ZN26AMDRadeonX6000_AmdAsicInfo7refreshEv", 0, false, 0, 0},
-        {Kext::FB, "PowerPlayHelper::powerUp", "__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv", 0, false, 0, 0},
-        {Kext::FB, "PowerPlayHelper::completeInit", "__ZN33AMDRadeonX6000_AmdPowerPlayHelper12completeInitEv", 0, false,
-            0, 0},
-        {Kext::FB, "PowerPlayHelper::gfxOffControl", "__ZN33AMDRadeonX6000_AmdPowerPlayHelper13gfxOffControlEjRm", 0,
-            false, 0, 0},
-        {Kext::FB, "PowerPlayHelper::dfCStateControl", "__ZN33AMDRadeonX6000_AmdPowerPlayHelper15dfCStateControlEjRm",
-            0, false, 0, 0},
-        {Kext::FB, "DalHelper::powerUp", "__ZN27AMDRadeonX6000_AmdDalHelper7powerUpEv", 0, false, 0, 0},
-        {Kext::FB, "Controller::setupLinks", "__ZN34AMDRadeonX6000_AmdRadeonController10setupLinksEv", 0, false, 0, 0},
-        {Kext::FB, "Controller::setupHdcpServices",
-            "__ZN34AMDRadeonX6000_AmdRadeonController17setupHdcpServicesEP10IOWorkLoop", 0, false, 0, 0},
-        {Kext::FB, "Controller::reportControllerProperties",
-            "__ZN34AMDRadeonX6000_AmdRadeonController26reportControllerPropertiesEv", 0, false, 0, 0},
-        {Kext::FB, "Controller::detectAllDisplays", "__ZN34AMDRadeonX6000_AmdRadeonController17detectAllDisplaysEv", 0,
-            false, 0, 0},
-        {Kext::FB, "Controller::establishBootDisplay",
-            "__ZN34AMDRadeonX6000_AmdRadeonController20establishBootDisplayEv", 0, false, 0, 0},
-        {Kext::FB, "Controller::createAgdc", "__ZN34AMDRadeonX6000_AmdRadeonController10createAgdcEv", 0, false, 0, 0},
-        // Accelerator (AMDRadeonX6000.kext, level 4+): the start path up to the hardware object.
-        {Kext::Accel, "Accelerator::probe", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5probeEP9IOServicePi", 0, true,
-            0, 0},
-        {Kext::Accel, "Accelerator::start", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService", 0, false,
-            0, 0},
-        {Kext::Accel, "Navi10Accelerator::setDeviceType",
-            "__ZN43AMDRadeonX6000_AMDNavi10GraphicsAccelerator13setDeviceTypeEP11IOPCIDevice", 0, false, 0, 0},
-        {Kext::Accel, "Accelerator::configureDevice",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator15configureDeviceEP11IOPCIDevice", 0, false, 0, 0},
-        {Kext::Accel, "Accelerator::createHWInterface",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator17createHWInterfaceEP11IOPCIDevice", 0, false, 0, 0},
-        // Level 4 stops here: no hardware object, so start fails before touching the GPU.
-        {Kext::Accel, "Navi10Accelerator::newHWInterface",
-            "__ZN43AMDRadeonX6000_AMDNavi10GraphicsAccelerator14newHWInterfaceEv", 5, true, 0, 0},
-        // From level 5 the hardware object is created and initialised up to TTL. Blocking its init instead is not
-        // an option: the teardown after a failed init (AMDHardware::free -> unmapDoorbellMemory) dereferences the
-        // handler that init stores, and panics (see the unmapDoorbellMemory guard below).
-        {Kext::Accel, "RTHardware::init",
-            "__ZN28AMDRadeonX6000_AMDRTHardware4initEP11IOPCIDeviceP28AMDRadeonX6000_IAMDHWHandlerRjP16_GART_"
-            "PARAMETERSP14_FB_PARAMETERS",
-            0, false, 0, 0},
+            "__ZN30AMDRadeonX6000_AMDRadeonHWLibs24createPowerPlayInterfaceEP18PowerPlayCallbacks", true, 0, 0},
+        {Kext::Accel, "Accelerator::start", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService", false, 0, 0},
         {Kext::Accel, "Hardware::init",
             "__ZN26AMDRadeonX6000_AMDHardware4initEP11IOPCIDeviceP28AMDRadeonX6000_IAMDHWHandlerRjP16_GART_"
             "PARAMETERSP14_FB_PARAMETERS",
-            0, false, 0, 0},
-        {Kext::Accel, "Hardware::initializeExternalInterfaces",
-            "__ZN26AMDRadeonX6000_AMDHardware28initializeExternalInterfacesEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::findHWServices", "__ZN26AMDRadeonX6000_AMDHardware14findHWServicesEv", 0, true, 0, 0},
-        {Kext::Accel, "Hardware::mapDoorbellMemory", "__ZN26AMDRadeonX6000_AMDHardware17mapDoorbellMemoryEv", 0,
             false, 0, 0},
-        // Level 5 stops here (bool; false makes init fail cleanly, with the doorbell mapped). Level 6 runs it: this is
-        // TTL::initialize(), CAIL's Navi 10 init of the GPU. It talks to the SMU with the Navi 10 message set, which
-        // the BC-250's SMU 11.0.8 interprets differently; level 6 is a deliberate, at-your-own-risk test.
         {Kext::Accel, "RTHardware::initializeTtl",
-            "__ZN28AMDRadeonX6000_AMDRTHardware13initializeTtlEP16_GART_PARAMETERS", 6, false, 0, 0},
-        {Kext::Accel, "Hardware::free", "__ZN26AMDRadeonX6000_AMDHardware4freeEv", 0, false, 0, 0},
-        {Kext::Accel, "RTHardware::configureRegisterBases",
-            "__ZN28AMDRadeonX6000_AMDRTHardware22configureRegisterBasesEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::getMemSizeRegister", "__ZN26AMDRadeonX6000_AMDHardware18getMemSizeRegisterEv", 0,
+            "__ZN28AMDRadeonX6000_AMDRTHardware13initializeTtlEP16_GART_PARAMETERS", false, 0, 0},
+        {Kext::Accel, "Navi10Hardware::allocateHWEngines", "__ZN32AMDRadeonX6000_AMDNavi10Hardware17allocateHWEnginesEv",
             false, 0, 0},
-        {Kext::Accel, "Navi10Hardware::setupAndInitializeHWCapabilities",
-            "__ZN32AMDRadeonX6000_AMDNavi10Hardware32setupAndInitializeHWCapabilitiesEv", 0, false, 0, 0},
-        {Kext::Accel, "RTHardware::allocateMemoryResources",
-            "__ZN28AMDRadeonX6000_AMDRTHardware23allocateMemoryResourcesEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::postVBIOSCAIL", "__ZN26AMDRadeonX6000_AMDHardware13postVBIOSCAILEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::initializeHardwareRegisters",
-            "__ZN26AMDRadeonX6000_AMDHardware27initializeHardwareRegistersEv", 0, false, 0, 0},
-        {Kext::Accel, "Navi10Hardware::initializeVmHardware",
-            "__ZN32AMDRadeonX6000_AMDNavi10Hardware20initializeVmHardwareEv", 0, false, 0, 0},
-        // Level 23: Hardware::init's own setup after initializeTtl (in its order: register bases, chip revision,
-        // workarounds, HW memory, GART, VM hubs, VMM, VM registers, family, GFX engine, capabilities, engine objects).
-        {Kext::Accel, "Navi10Hardware::readChipRevFromRegister",
-            "__ZN32AMDRadeonX6000_AMDNavi10Hardware23readChipRevFromRegisterEv", 0, false, 0, 0},
-        {Kext::Accel, "Navi10Hardware::initializeHWWorkarounds",
-            "__ZN32AMDRadeonX6000_AMDNavi10Hardware23initializeHWWorkaroundsEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::allocateAMDHWMemory", "__ZN31AMDRadeonX6000_AMDGFX10Hardware19allocateAMDHWMemoryEv",
-            0, true, 0, 0},
-        {Kext::Accel, "HWMemory::init", "__ZN26AMDRadeonX6000_AMDHWMemory4initEP30AMDRadeonX6000_IAMDHWInterface", 0,
-            false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::allocateAMDHWGart", "__ZN31AMDRadeonX6000_AMDGFX10Hardware17allocateAMDHWGartEv", 0,
-            true, 0, 0},
-        {Kext::Accel, "HWGart::init",
-            "__ZN24AMDRadeonX6000_AMDHWGart4initEP30AMDRadeonX6000_IAMDHWInterfaceP16_GART_PARAMETERS", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::allocateAndInitAMDHWVMHubs",
-            "__ZN31AMDRadeonX6000_AMDGFX10Hardware26allocateAndInitAMDHWVMHubsEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::allocateAMDHWVMM", "__ZN31AMDRadeonX6000_AMDGFX10Hardware16allocateAMDHWVMMEv", 0,
-            true, 0, 0},
-        {Kext::Accel, "HWVMM::init", "__ZN23AMDRadeonX6000_AMDHWVMM4initEP30AMDRadeonX6000_IAMDHWInterfacej", 0, false,
-            0, 0},
-        {Kext::Accel, "GFX10Hardware::setVMRegisters", "__ZN31AMDRadeonX6000_AMDGFX10Hardware14setVMRegistersEv", 0,
-            false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::initializeFamilyType",
-            "__ZN31AMDRadeonX6000_AMDGFX10Hardware20initializeFamilyTypeEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::initializeGFXEngine", "__ZN31AMDRadeonX6000_AMDGFX10Hardware19initializeGFXEngineEv",
-            0, false, 0, 0},
-        {Kext::Accel, "Navi10Hardware::allocateHWEngines", "__ZN32AMDRadeonX6000_AMDNavi10Hardware17allocateHWEnginesEv", 0,
-            false, 0, 0},
-        {Kext::Accel, "Hardware::setReservedVRAMOffset", "__ZN26AMDRadeonX6000_AMDHardware21setReservedVRAMOffsetEyy", 0,
-            false, 0, 0},
-        // Level 24: the engines' init (below it Hardware::init stops here). Each engine object allocates its memory
-        // (rings, MQDs) and its channels (GFX, compute, KIQ, HIQ; SDMA's); the CP is programmed later, at engine
-        // start (doStart/startHWEngines). VCN2's engine is removed (VCN is a stub, unusable on the BC-250).
-        {Kext::Accel, "Hardware::initializeHWEngines", "__ZN26AMDRadeonX6000_AMDHardware19initializeHWEnginesEv", 24,
-            false, 0, 0},
-        {Kext::Accel, "Navi10PM4Engine::init",
-            "__ZN33AMDRadeonX6000_AMDNavi10PM4Engine4initEP30AMDRadeonX6000_IAMDHWInterface20_eAMD_HW_ENGINE_TYPE", 0,
-            false, 0, 0},
-        {Kext::Accel, "GFX10PM4Engine::allocateMemoryResources",
-            "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine23allocateMemoryResourcesEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10PM4Engine::allocateAndInitHWChannels",
-            "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine25allocateAndInitHWChannelsEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10SDMAEngine::init",
-            "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine4initEP30AMDRadeonX6000_IAMDHWInterface20_eAMD_HW_ENGINE_TYPE", 0,
-            false, 0, 0},
-        {Kext::Accel, "GFX10SDMAEngine::allocateAndInitHWChannels",
-            "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine25allocateAndInitHWChannelsEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::allocateAMDHWDisplay", "__ZN31AMDRadeonX6000_AMDGFX10Hardware20allocateAMDHWDisplayEv",
-            0, false, 0, 0},
-        // Level 25: the accelerator's start after Hardware::init (channels, power service). The hardware is powered up
-        // when something asks the accelerator by platform function (callPlatformFunction -> powerUpHW); powerUpHW
-        // (NDRV space, blit manager, VRAM reduction) calls AMDHardware::powerUp: disableGfxOff, setupInternalSpace,
-        // enableTransactions, powerUpHWEngines, startHWEngines (the CP's first programming), initHWInfo,
-        // enableGfxOff. Level 25 holds powerUp back (level 26).
-        {Kext::Accel, "Accelerator::createAccelChannels",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator19createAccelChannelsEb", 0, false, 0, 0},
-        {Kext::Accel, "Accelerator::findAndRegisterPowerService",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator27findAndRegisterPowerServiceEv", 0, false, 0, 0},
-        {Kext::Accel, "Accelerator::powerUpHW", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator9powerUpHWEv", 0, false, 0,
-            0},
-        {Kext::Accel, "Accelerator::reserveNDRVSpace", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator16reserveNDRVSpaceEv", 0,
-            false, 0, 0},
-        {Kext::Accel, "Accelerator::createBltMgr", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator12createBltMgrEv", 0, false,
-            0, 0},
-        {Kext::Accel, "Accelerator::reduceVRAM", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator10reduceVRAMEv", 0, false, 0,
-            0},
-        // Level 26: AMDHardware::powerUp runs (register writes still logged and not made): GFXOFF off (masked: the
-        // BC-250 runs without GFXOFF), setupInternalSpace (VM hardware, shader-engine memory config), each engine's
-        // powerUp (the PM4 engine's start: CP rings, KIQ), the SDMA engines' start, initHWInfo.
-        {Kext::Accel, "Hardware::powerUp", "__ZN26AMDRadeonX6000_AMDHardware7powerUpEv", 26, false, 0, 0},
-        {Kext::Accel, "RTHardware::disableGfxOff", "__ZN28AMDRadeonX6000_AMDRTHardware13disableGfxOffEv", 0, false, 0,
-            0},
-        {Kext::Accel, "Navi10Hardware::setShaderEngineMemConfig",
-            "__ZN32AMDRadeonX6000_AMDNavi10Hardware24setShaderEngineMemConfigEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::powerUpHWEngines", "__ZN26AMDRadeonX6000_AMDHardware16powerUpHWEnginesEv", 0, false, 0,
-            0},
-        {Kext::Accel, "GFX10PM4Engine::doStart", "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine7doStartEb", 0, false, 0, 0},
-        {Kext::Accel, "GFX10SDMAEngine::start", "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::initHWInfo", "__ZN31AMDRadeonX6000_AMDGFX10Hardware10initHWInfoEv", 0, false, 0,
-            0},
-        {Kext::Accel, "Hardware::isDeviceValid", "__ZN26AMDRadeonX6000_AMDHardware13isDeviceValidEv", 0, false, 0, 0},
-        {Kext::Accel, "Hardware::startHWEngines", "__ZN26AMDRadeonX6000_AMDHardware14startHWEnginesEv", 0, false, 0,
-            0},
-        {Kext::Accel, "Accelerator::initialize_hardware",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator19initialize_hardwareEv", 0, false, 0, 0},
-        // Level 28: with WindowServer's Metal device created the accelerator ends in a wait loop (isDeviceValid,
-        // controller request 0x14) ~0.5 s after the first per-process page tables and the machine freezes (CPUs that
-        // ack no NMI: a bus-level stall). Apple's hang detection and recovery are logged; the parts that read
-        // debug/queue state or reset GPU blocks the Navi 10 way are not run (kNever: logged, answered 0).
-        // Blocked since 28i: the log always ended at its entry, the machine froze right after (~10 s after the GPU
-        // stopped); without it the GPU stays hung but the machine can be inspected.
-        {Kext::Accel, "AccelEventMachine::eventTimeout", "__ZN35AMDRadeonX6000_AMDAccelEventMachine12eventTimeoutEi",
-            kNever, false, 0, 0},
-        {Kext::Accel, "SWScheduler::signalTimeout", "__ZN29AMDRadeonX6000_AMDSWScheduler13signalTimeoutEmj", 0, false, 0,
-            0},
+        {Kext::Accel, "Hardware::powerUp", "__ZN26AMDRadeonX6000_AMDHardware7powerUpEv", false, 0, 0},
+        // Apple's hang recovery reads debug/queue state and resets GPU blocks the Navi 10 way, which hangs the BC-250.
         {Kext::Accel, "AccelChannel::resetHardwareAndReplay",
-            "__ZN30AMDRadeonX6000_AMDAccelChannel22resetHardwareAndReplayEv", kNever, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::checkASICHangState", "__ZN31AMDRadeonX6000_AMDGFX10Hardware18checkASICHangStateEb",
-            0, false, 0, 0},
-        {Kext::Accel, "Hardware::dumpASICHangState", "__ZN26AMDRadeonX6000_AMDHardware17dumpASICHangStateEb", kNever,
-            false, 0, 0},
+            "__ZN30AMDRadeonX6000_AMDAccelChannel22resetHardwareAndReplayEv", true, 0, 0},
+        {Kext::Accel, "Hardware::dumpASICHangState", "__ZN26AMDRadeonX6000_AMDHardware17dumpASICHangStateEb", true, 0, 0},
         {Kext::Accel, "GFX10Hardware::asicHangReadROQandMEQStatus",
-            "__ZN31AMDRadeonX6000_AMDGFX10Hardware27asicHangReadROQandMEQStatusER27amdAsicHangDumpROQMEQStatus", kNever,
-            false, 0, 0},
-        {Kext::Accel, "Hardware::resetHardware", "__ZN26AMDRadeonX6000_AMDHardware13resetHardwareEjPj", kNever, false, 0,
+            "__ZN31AMDRadeonX6000_AMDGFX10Hardware27asicHangReadROQandMEQStatusER27amdAsicHangDumpROQMEQStatus", true, 0,
             0},
-        {Kext::Accel, "GFX10PM4Engine::cpSoftReset", "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine11cpSoftResetEv", kNever,
-            false, 0, 0},
-        {Kext::Accel, "GFX10PM4Engine::gfxEngineReset", "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine14gfxEngineResetEv", kNever,
-            false, 0, 0},
-        // Level 28: GPU interrupts do not reach the accelerator yet (no IH ring set up for the BC-250). With
-        // useTimestampInterrupts true (after enableInterrupts), AMDAccelChannel::waitForTimestamp skips polling and waits
-        // for stamp interrupts: SDMA finished (fence 26) but the scheduler's last read stayed 22 and WindowServer
-        // waited forever (28n). Answered false, the waiters poll the fences (SWScheduler::checkTimestamps).
-        {Kext::Accel, "Hardware::useTimestampInterrupts", "__ZN26AMDRadeonX6000_AMDHardware22useTimestampInterruptsEv",
-            kNever, false, 0, 0},
-        // Level 28: the IH ring works (the framebuffer's interrupt manager consumes ~100 interrupts/s), yet the
-        // accelerator's (stamps, display pipe transactions) never came: its registrations, enables and callbacks.
-        {Kext::Accel, "Accelerator::registerInterrupt",
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator17registerInterruptEjPFvP8OSObjectPvES1_S2_PS2_", 0, false, 0, 0},
-        {Kext::Accel, "Accelerator::setInterruptState", "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator17setInterruptStateEPvj",
-            0, false, 0, 0},
-        {Kext::Accel, "HWChannel::timeStampInterruptCallback",
-            "__ZN27AMDRadeonX6000_AMDHWChannel26timeStampInterruptCallbackEP8OSObjectPv", 0, false, 0, 0},
-        {Kext::Accel, "AccelDisplayPipe::processTransactionInterrupt",
-            "__ZN34AMDRadeonX6000_AMDAccelDisplayPipe27processTransactionInterruptEP8OSObjectPv", 0, false, 0, 0},
-        {Kext::Accel, "AccelDisplayPipe::displayFrameStartInterruptHandler",
-            "__ZN34AMDRadeonX6000_AMDAccelDisplayPipe33displayFrameStartInterruptHandlerEP8OSObjectPv", 0, false, 0, 0},
-        // Level 28 (28r): none of the above was called, yet SDMA0's trap and the GFX ring's timestamp interrupt got
-        // enabled. The steps that lead there: the hardware's and channels' enables (a channel's source at +0xA8,
-        // registered flag +0x88), the display pipe's registrations ('txni', 'fstr') and the framebuffer's side.
-        {Kext::Accel, "Hardware::enableInterrupts", "__ZN26AMDRadeonX6000_AMDHardware16enableInterruptsEv", 0, false, 0,
-            0},
-        {Kext::Accel, "HWVMM::enableInterrupts", "__ZN23AMDRadeonX6000_AMDHWVMM16enableInterruptsEv", 0, false, 0, 0},
-        {Kext::Accel, "HWChannel::enableTimestampInterrupt",
-            "__ZN27AMDRadeonX6000_AMDHWChannel24enableTimestampInterruptEv", 0, false, 0, 0},
-        {Kext::Accel, "HWChannel::registerTimestampInterrupt",
-            "__ZN27AMDRadeonX6000_AMDHWChannel26registerTimestampInterruptEv", 0, false, 0, 0},
-        {Kext::Accel, "PM4ComputeChannel::enableTimestampInterrupt",
-            "__ZN40AMDRadeonX6000_AMDGFX10PM4ComputeChannel24enableTimestampInterruptEv", 0, false, 0, 0},
-        {Kext::Accel, "PM4ComputeChannel::registerTimestampInterrupt",
-            "__ZN40AMDRadeonX6000_AMDGFX10PM4ComputeChannel26registerTimestampInterruptEv", 0, false, 0, 0},
-        {Kext::Accel, "AccelDisplayPipe::initializeTransaction",
-            "__ZN34AMDRadeonX6000_AMDAccelDisplayPipe21initializeTransactionEv", 0, false, 0, 0},
-        {Kext::Accel, "AccelDisplayPipe::enableTransactionInterrupt",
-            "__ZN34AMDRadeonX6000_AMDAccelDisplayPipe26enableTransactionInterruptEv", 0, false, 0, 0},
-        {Kext::Accel, "CPEvent::addInterruptEvent",
-            "__ZN25AMDRadeonX6000_AMDCPEvent17addInterruptEventEPFvP8OSObjectPvES2_", 0, false, 0, 0},
-        {Kext::FB, "Framebuffer::registerForInterruptType",
-            "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer24registerForInterruptTypeEjPFvP8OSObjectPvES1_S2_PS2_", 0, false,
+        {Kext::Accel, "Hardware::resetHardware", "__ZN26AMDRadeonX6000_AMDHardware13resetHardwareEjPj", true, 0, 0},
+        {Kext::Accel, "GFX10PM4Engine::cpSoftReset", "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine11cpSoftResetEv", true, 0, 0},
+        {Kext::Accel, "GFX10PM4Engine::gfxEngineReset", "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine14gfxEngineResetEv", true,
             0, 0},
-        {Kext::FB, "Framebuffer::setInterruptState", "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer17setInterruptStateEPvj",
-            0, false, 0, 0},
-        // 28t: the GPU's EOP and SDMA trap IVs reach the IH ring and the interrupt manager (IRQMgr) consumes them, yet
-        // HWChannel::timeStampInterruptCallback (the handler the channels registered) never runs. IRQMgr calls an
-        // event's notifyCallback (event vtable +0x168) for each source it dispatches: which events it enables and
-        // which it dispatches (counted, not logged per call).
-        {Kext::FB, "InterruptEvent::doEnable", "__ZN32AMDRadeonX6000_AmdInterruptEvent8doEnableEv", 0, false, 0, 0},
-        {Kext::FB, "InterruptEvent::enable", "__ZN32AMDRadeonX6000_AmdInterruptEvent6enableEPv", 0, false, 0, 0},
-        {Kext::FB, "InterruptEvent::notifyCallback", "__ZN32AMDRadeonX6000_AmdInterruptEvent14notifyCallbackEPv", 0,
-            false, 0, 0},
-        // 28z3: Apple's own account of a GPU VM fault: the faulting task, and the diagnosis text (logged).
-        {Kext::Accel, "AccelTask::reportVmFault", "__ZN27AMDRadeonX6000_AMDAccelTask13reportVmFaultEyj", 0, false, 0, 0},
-        {Kext::Accel, "GFX10Hardware::writeVMProtectionFaultDiagnosisReport",
-            "__ZN31AMDRadeonX6000_AMDGFX10Hardware37writeVMProtectionFaultDiagnosisReportERPcRj", 0, false, 0, 0},
-        {Kext::Accel, "GFX10VMM::writeVmFaultProtectionString",
-            "__ZN26AMDRadeonX6000_AMDGFX10VMM28writeVmFaultProtectionStringERPcRjRKN23AMDRadeonX6000_AMDHWVMM13VM_FAULT_"
-            "INFOE",
-            0, false, 0, 0},
+        // SDMA1's interrupt events (see sdma1Kick).
+        {Kext::FB, "Framebuffer::registerForInterruptType",
+            "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer24registerForInterruptTypeEjPFvP8OSObjectPvES1_S2_PS2_", false, 0,
+            0},
+        {Kext::FB, "InterruptEvent::notifyCallback", "__ZN32AMDRadeonX6000_AmdInterruptEvent14notifyCallbackEPv", false,
+            0, 0},
     };
 
     UInt32 surveyLevel = 1;
@@ -351,61 +97,7 @@ namespace
         return meta != nullptr ? meta->getClassName() : "?";
     }
 
-    // 28z8: flight recorder. The machine freezes hard (no fault, logs stop mid-second) when a second Firefox GPU
-    // helper starts; the log thread writes the last 512 GPU-memory and submission events to
-    // /private/var/log/bc250.flight.log every 0.2 s, so the file holds what the driver did last.
-    enum FlightKind : UInt32
-    {
-        kFlightMapVa = 1,
-        kFlightUnmapVa,
-        kFlightPtes,
-        kFlightVmProgram,
-        kFlightMapProcess,
-        kFlightInvalidate,
-        kFlightIrq,
-        kFlightSubmitPm4,
-        kFlightSubmitDma,
-        kFlightFault,
-        kFlightWaitVmid,
-        kFlightAssignVmid,
-    };
-    struct FlightEvent
-    {
-        UInt64 time;
-        UInt32 kind;
-        UInt32 cpu;
-        UInt64 a, b, c, d;
-    };
-    constexpr UInt32       kFlightSize = 2048;
-    FlightEvent            flight[kFlightSize];
-    volatile SInt32        flightNext = 0;
-
-    // Diagnostics for GPU hangs, opt-in (bc250flight=1): the flight recorder and its hooks (map/unmap, submissions,
-    // VMID handover), the flight file, the IH ring reader and a 5 s GPU state snapshot in the log.
-    bool flightOn = false;
-
-    void flightRecord(UInt32 kind, UInt64 a, UInt64 b = 0, UInt64 c = 0, UInt64 d = 0)
-    {
-        if (!flightOn) { return; }
-        const UInt32 at = static_cast<UInt32>(OSIncrementAtomic(&flightNext)) % kFlightSize;
-        auto&        e  = flight[at];
-        e.kind          = 0;
-        e.time          = mach_absolute_time();
-        e.cpu           = static_cast<UInt32>(reinterpret_cast<UInt64>(current_thread()) >> 4);
-        e.a             = a;
-        e.b             = b;
-        e.c             = c;
-        e.d             = d;
-        e.kind          = kind;
-    }
-
-    char printable(UInt32 c)
-    {
-        c &= 0xFF;
-        return (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '.';
-    }
-
-    void gcCpBrief(const char* when);
+    void        gcCpBrief(const char* when);
     const char* kextOf(mach_vm_address_t a, mach_vm_address_t* offset);
     void        hwChannelsDump(const char* when);
 
@@ -421,7 +113,6 @@ namespace
     // start, before WindowServer (28b-28d; with the fill off the same build stays up): something in the kernel acts on
     // non-zero clocks. By default (bc250clk=1) the kernel keeps Apple's zeros and only getHardwareInfo's copy for the
     // Metal driver gets the BC-250's clocks (wrapAccelHwInfo). bc250clk=0: neither.
-    constexpr UInt32 kHwInfoRefClk = 0x190, kHwInfoSysClk = 0x198, kHwInfoMemClk = 0x1A0, kHwInfoCgRefClk = 0x1A8;
     constexpr UInt64 kBc250RefClk = 10000, kBc250SysClk = 200000, kBc250MemClk = 175000;
     SInt32           hwInfoClockMode = -1;
 
@@ -438,93 +129,6 @@ namespace
         return static_cast<UInt32>(hwInfoClockMode);
     }
 
-    void hwInfoClocks(void* hw)
-    {
-        if (hw == nullptr) { return; }
-        auto& ref = getMember<UInt64>(hw, kHwInfoRefClk);
-        auto& sys = getMember<UInt64>(hw, kHwInfoSysClk);
-        auto& mem = getMember<UInt64>(hw, kHwInfoMemClk);
-        auto& cg  = getMember<UInt64>(hw, kHwInfoCgRefClk);
-        BCLOG("BC250HWL", "level 28: HW info clocks ref %llu sys %llu mem %llu cgref %llu (10 kHz); +0xD0 0x%X, +0xE8 0x%llX, "
-                          "+0xF0 0x%llX",
-            ref, sys, mem, cg, getMember<UInt16>(hw, 0xD0), getMember<UInt64>(hw, 0xE8), getMember<UInt64>(hw, 0xF0));
-        if (hwInfoClkMode() != 2) { return; }
-        if (ref == 0) { ref = kBc250RefClk; }
-        if (sys == 0) { sys = kBc250SysClk; }
-        if (mem == 0) { mem = kBc250MemClk; }
-        if (cg == 0) { cg = kBc250RefClk; }
-        BCLOG("BC250HWL", "level 28: HW info clocks now ref %llu sys %llu mem %llu cgref %llu", ref, sys, mem, cg);
-    }
-
-    // Level 27: the CP was idle after GC's hw_init and stuck (fetcher and VM L2 busy) before powerUp; its state is
-    // taken around the steps in between (first call of each).
-    bool cpWatched(const char* name)
-    {
-        constexpr const char* kWatched[] = {"RTHardware::initializeTtl", "RTHardware::allocateMemoryResources",
-            "GFX10PM4Engine::allocateMemoryResources", "Accelerator::createAccelChannels", "Accelerator::start",
-            "Accelerator::powerUpHW", "AccelEventMachine::eventTimeout", "SWScheduler::signalTimeout",
-            "AccelChannel::resetHardwareAndReplay", "GFX10Hardware::checkASICHangState"};
-        for (const auto* watched : kWatched) {
-            if (strcmp(name, watched) == 0) { return true; }
-        }
-        return false;
-    }
-
-    // The pass-throughs' work before and after the original, out of line: the hooks nest (six deep from the
-    // accelerator's start into TTL's init), and with it inline each pass-through's frame grew until the kernel stack
-    // overflowed there (28r, a double fault in GVM's hw_init logging).
-    // 28z3: text Apple's diagnosis writers put in their buffer (between the buffer pointer before and after the call).
-    const char* diagText = nullptr;
-
-    void logDiagText(const char* name, const char* from, const char* to)
-    {
-        if (from == nullptr || to == nullptr || to <= from) { return; }
-        const size_t length = static_cast<size_t>(to - from) > 6000 ? 6000 : static_cast<size_t>(to - from);
-        char         chunk[241];
-        for (size_t at = 0; at < length;) {
-            size_t n = 0;
-            while (at < length && n < sizeof(chunk) - 1) {
-                const char ch = from[at++];
-                if (ch == '\n') { break; }
-                chunk[n++] = (ch >= 0x20 && ch < 0x7F) ? ch : '.';
-            }
-            chunk[n] = '\0';
-            if (n != 0) { BCLOG("BC250HWL", "%s: %s", name, chunk); }
-        }
-    }
-
-    enum : UInt32
-    {
-        kWrapRun   = 1,
-        kWrapWatch = 2,
-        kWrapStart = 4,
-        kWrapStamp = 8,
-        kWrapQuiet = 16,
-    };
-
-    // 28t: an IRQMgr event (AmdInterruptEvent): +0x18 its InterruptInfo (+0 type, +8 name, +0x14 IRQMgr source ID),
-    // +0xD8 flags (bit 0 enabled, bit 1 ignored, bit 4 notifies).
-    struct IrqEventCount
-    {
-        UInt32 type;
-        UInt32 count;
-    };
-    IrqEventCount irqEvents[40];
-    UInt32        irqEventKinds = 0;
-
-    const char* irqEventName(void* event, UInt32* type, UInt32* source)
-    {
-        auto* info = event ? getMember<UInt8*>(event, 0x18) : nullptr;
-        if (info == nullptr) {
-            *type = *source = 0;
-            return "?";
-        }
-        *type        = *reinterpret_cast<UInt32*>(info);
-        *source      = *reinterpret_cast<UInt32*>(info + 0x14);
-        const auto* n = *reinterpret_cast<const char**>(info + 8);
-        return n ? n : "?";
-    }
-
     // 28u: the registrations (framebuffer registerForInterruptType): the handle it returns is {event, callback}; the
     // callback (AmdInterruptCallback) is +0x18 function, +0x20 owner, +0x30 enabled, +0x58 reference.
     struct IrqRegistration
@@ -538,14 +142,8 @@ namespace
 
     void irqRegistered(UInt32 type, void** handle)
     {
-        if (handle == nullptr) { return; }
-        void* event    = handle[0];
-        void* callback = handle[1];
-        if (irqRegCount < arrsize(irqRegs)) { irqRegs[irqRegCount++] = {type, event, callback}; }
-        BCLOG("BC250HWL", "IRQ registration 0x%08X: event %p (%u callbacks), callback %p (%s) fn %p owner %p enabled %u",
-            type, event, event ? getMember<UInt32>(event, 0x48) : 0, callback, className(callback),
-            callback ? getMember<void*>(callback, 0x18) : nullptr, callback ? getMember<void*>(callback, 0x20) : nullptr,
-            callback ? getMember<UInt8>(callback, 0x30) : 0);
+        if (handle == nullptr || irqRegCount >= arrsize(irqRegs)) { return; }
+        irqRegs[irqRegCount++] = {type, handle[0], handle[1]};
     }
 
     // 28y: SDMA1's traps (IH client 9, source 0xE0) reach the ring once its TRAP_ENABLE is set (28x), but IRQMgr never
@@ -648,119 +246,27 @@ namespace
         return ret;
     }
 
-    void vmFaultWalk();
-
-    // 28z4: Apple's own register dumps at a GPU VM fault (the CP's ring and pipeline status by register name, and its
-    // VM protection fault report), written into a buffer and copied to the log. The PM4 engine is the hardware's
-    // engine slot 0 (+0x3B0).
-    void*             accelHardware = nullptr;
-    mach_vm_address_t diagRingStatus = 0, diagPipelineStatus = 0, diagVmFault = 0;
-    char              diagBuffer[16384];
-
-    void logDiagText(const char* name, const char* from, const char* to);
-    const char* className(const void* object);
-
-    void faultReports()
+    enum : UInt32
     {
-        using Writer = void (*)(void*, char*&, UInt32&);
-        auto run     = [](const char* name, mach_vm_address_t fn, void* object) {
-            if (fn == 0 || object == nullptr) { return; }
-            char*  at   = diagBuffer;
-            UInt32 left = sizeof(diagBuffer) - 1;
-            reinterpret_cast<Writer>(fn)(object, at, left);
-            logDiagText(name, diagBuffer, at);
-        };
-        if (accelHardware == nullptr) { return; }
-        void*       pm4  = getMember<void*>(accelHardware, 0x3B0);
-        const char* name = className(pm4);
-        if (pm4 != nullptr && strstr(name, "PM4Engine") != nullptr) {
-            run("PM4 ring status", diagRingStatus, pm4);
-            run("PM4 pipeline status", diagPipelineStatus, pm4);
-        }
-        else {
-            BCLOG("BC250HWL", "VM fault: engine slot 0 is %s, no PM4 status", name);
-        }
-        run("VM protection fault", diagVmFault, accelHardware);
-    }
+        kWrapRun   = 1,
+        kWrapStart = 2,
+        kWrapQuiet = 4,
+    };
 
-    void irqEventNotified(void* event)
+    __attribute__((noinline)) UInt32 wrapBefore(Hook& hook, void* a, void* b, void*)
     {
-        UInt32      type, source;
-        const char* name = irqEventName(event, &type, &source);
-        UInt32      k    = 0;
-        while (k < irqEventKinds && irqEvents[k].type != type) { k++; }
-        if (k == irqEventKinds && irqEventKinds < arrsize(irqEvents)) {
-            irqEvents[irqEventKinds++] = {type, 0};
-            BCLOG("BC250HWL", "IRQ event first dispatched: %s, type 0x%08X, source 0x%X, flags 0x%02X, event %p with %u "
-                              "callbacks",
-                name, type, source, getMember<UInt8>(event, 0xD8), event, getMember<UInt32>(event, 0x48));
-            for (UInt32 r = 0; r < irqRegCount; r++) {
-                if (irqRegs[r].type != type) { continue; }
-                const auto* cb = irqRegs[r].callback;
-                const auto* fn = cb ? getMember<const UInt8*>(const_cast<void*>(cb), 0x18) : nullptr;
-                BCLOG("BC250HWL", "IRQ event 0x%08X: registration %u on event %p (%s), callback %p enabled %u fn %p", type,
-                    r, irqRegs[r].event, irqRegs[r].event == event ? "the dispatched one" : "ANOTHER event", cb,
-                    cb ? getMember<UInt8>(const_cast<void*>(cb), 0x30) : 0, fn);
-                // 28v: is the function the callback calls our route (a jump) or Apple's untouched prologue?
-                if (fn != nullptr) {
-                    BCLOG("BC250HWL", "IRQ event 0x%08X: fn bytes %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X "
-                                      "%02X %02X %02X %02X %02X",
-                        type, fn[0], fn[1], fn[2], fn[3], fn[4], fn[5], fn[6], fn[7], fn[8], fn[9], fn[10], fn[11], fn[12],
-                        fn[13], fn[14], fn[15]);
-                }
-            }
-        }
-        if (k < irqEventKinds) { irqEvents[k].count++; }
-        if (type != 0xFF00007B) { flightRecord(kFlightIrq, type, source); }
-        // 28z: a GPU VM fault (IRQ_SOURCEX_VM_CONTEXT0/1_ALL): its page-table walk, before Apple's handler runs.
-        static UInt32 walks = 0;
-        if ((type == 0xFF0000E9 || type == 0xFF0000EA) && walks++ < 4) {
-            vmFaultWalk();
-            faultReports();
-        }
-    }
-
-    __attribute__((noinline)) UInt32 wrapBefore(Hook& hook, void* a, void* b, void* c)
-    {
-        const auto block = surveyLevel < hook.runFrom;
         hook.calls += 1;
-        if (!block && strcmp(hook.name, "InterruptEvent::notifyCallback") == 0) {
-            irqEventNotified(a);
+        if (hook.block) { return 0; }
+        if (strcmp(hook.name, "InterruptEvent::notifyCallback") == 0) {
             sdma1Kick(hook.org, a, b);
             return kWrapRun | kWrapQuiet;
         }
-        if (!block && hook.calls <= 64 && strncmp(hook.name, "InterruptEvent::", 16) == 0) {
-            UInt32      type, source;
-            const char* name = irqEventName(a, &type, &source);
-            BCLOG("BC250HWL", "%s: %s, type 0x%08X, source 0x%X, flags 0x%02X", hook.name, name, type, source,
-                getMember<UInt8>(a, 0xD8));
-        }
-        if (block) {
-            if (hook.calls <= 4) { BCLOG("BC250HWL", "%s(%p, %p): blocked, returning 0", hook.name, a, b); }
-            return 0;
-        }
-        const UInt32 limit = hook.kext == Kext::FB ? 64 : 16;
-        if (hook.calls <= limit) { BCLOG("BC250HWL", "%s(%p, %p, %p) >>>", hook.name, a, b, c); }
-        // Level 26: GFXOFF stays off (hardware +0x206c0 selects Apple's GFXOFF requests to the SMU, which is a stub;
-        // Linux keeps GFXOFF off on the BC-250).
-        if (surveyLevel >= 26 && strcmp(hook.name, "Hardware::powerUp") == 0) {
-            auto& gfxOff = getMember<UInt8>(a, kHwGfxOffSupported);
-            BCLOG("BC250HWL", "level 26: GFXOFF flag %u%s", gfxOff, gfxOff ? ", cleared" : "");
-            gfxOff = 0;
-        }
-        if (strstr(hook.name, "DiagnosisReport") != nullptr || strstr(hook.name, "ProtectionString") != nullptr) {
-            diagText = b ? *static_cast<const char**>(b) : nullptr;
-        }
+        // GFXOFF stays off (hardware +0x206c0 selects Apple's GFXOFF requests to the SMU, which is a stub; Linux keeps
+        // GFXOFF off on the BC-250).
+        if (strcmp(hook.name, "Hardware::powerUp") == 0) { getMember<UInt8>(a, kHwGfxOffSupported) = 0; }
         const bool start = strcmp(hook.name, "Accelerator::start") == 0;
-        const bool watch = surveyLevel >= 27 && hook.calls == 1 && cpWatched(hook.name);
-        if (watch) { gcCpBrief(hook.name); }
         if (start) { accelInStart = true; }
-        const bool stampIrq = surveyLevel >= 28 && hook.calls <= limit && strstr(hook.name, "TimestampInterrupt") != nullptr;
-        if (stampIrq) {
-            BCLOG("BC250HWL", "%s: %s source 0x%X registered %u handle %p", hook.name, className(a),
-                getMember<UInt32>(a, 0xA8), getMember<UInt8>(a, 0x88), getMember<void*>(a, 0x90));
-        }
-        return kWrapRun | (watch ? kWrapWatch : 0) | (start ? kWrapStart : 0) | (stampIrq ? kWrapStamp : 0);
+        return kWrapRun | (start ? kWrapStart : 0);
     }
 
     // VCN (video decode/encode) is a stub on the BC-250, but Apple's Navi 10 accelerator personality advertises it
@@ -798,94 +304,37 @@ namespace
         names->release();
     }
 
-    __attribute__((noinline)) UInt64 wrapAfter(Hook& hook, UInt32 flags, UInt64 ret, void* a, void* b, void* d, void* f, void* caller)
+    __attribute__((noinline)) UInt64 wrapAfter(Hook& hook, UInt32 flags, UInt64 ret, void* a, void* b, void*, void* f, void*)
     {
-        const UInt32 limit    = hook.kext == Kext::FB ? 64 : 16;
-        const bool   start    = (flags & kWrapStart) != 0;
-        const bool   watch    = (flags & kWrapWatch) != 0;
-        const bool   stampIrq = (flags & kWrapStamp) != 0;
         if (flags & kWrapQuiet) { return ret; }
-        if (start) {
+        if (flags & kWrapStart) {
             accelInStart = false;
-            if (surveyLevel >= 28 && (ret & 0xFF) != 0) { removeVideoProperties(a); }
+            if ((ret & 0xFF) != 0) { removeVideoProperties(a); }
         }
-        if ((strstr(hook.name, "DiagnosisReport") != nullptr || strstr(hook.name, "ProtectionString") != nullptr) &&
-            diagText != nullptr && b != nullptr)
-        {
-            logDiagText(hook.name, diagText, *static_cast<const char**>(b));
-            diagText = nullptr;
+        if (strcmp(hook.name, "Framebuffer::registerForInterruptType") == 0 && ret == 0 && f != nullptr) {
+            irqRegistered(static_cast<UInt32>(reinterpret_cast<UInt64>(b)), *static_cast<void***>(f));
         }
-        if (stampIrq) {
-            BCLOG("BC250HWL", "%s: after, registered %u handle %p", hook.name, getMember<UInt8>(a, 0x88),
-                getMember<void*>(a, 0x90));
-        }
-        if (surveyLevel >= 28 && strcmp(hook.name, "Framebuffer::registerForInterruptType") == 0) {
-            const auto type = static_cast<UInt32>(reinterpret_cast<UInt64>(b));
-            BCLOG("BC250HWL", "Framebuffer::registerForInterruptType: type 0x%08X ('%c%c%c%c') owner %s, handle %p", type,
-                printable(type >> 24), printable(type >> 16), printable(type >> 8), printable(type), className(d),
-                f ? *static_cast<void**>(f) : nullptr);
-            if (ret == 0 && f != nullptr) { irqRegistered(type, *static_cast<void***>(f)); }
-        }
-        if (watch) { gcCpBrief("returned"); }
-        // Level 28: a wait loop polls isDeviceValid before the freeze; who waits, and the GPU meanwhile.
-        if (surveyLevel >= 28 && (hook.calls == 64 || hook.calls == 1024 || (hook.calls % 16384) == 0) &&
-            strcmp(hook.name, "Hardware::isDeviceValid") == 0) {
-            mach_vm_address_t offset = 0;
-            const char*       kext   = kextOf(reinterpret_cast<mach_vm_address_t>(caller), &offset);
-            BCLOG("BC250HWL", "Hardware::isDeviceValid: call %u from %s+0x%llX", hook.calls, kext ? kext : "?", offset);
-            gcCpBrief("isDeviceValid wait");
-            hwChannelsDump("isDeviceValid wait");
-        }
-        if (surveyLevel >= 28 && strcmp(hook.name, "GFX10Hardware::initHWInfo") == 0) {
-            accelHardware = a;
-            hwInfoClocks(a);
-        }
-        // Level 22: TTL's init of the GPU completes (every SWIP's hw_init ran or is a stub); what follows in
-        // Hardware::init is the accelerator's own setup (register bases, capabilities, memory, engines), which has never
-        // run. Below level 23 a successful initializeTtl is reported failed, so init stops cleanly and tears TTL down.
-        if ((surveyLevel == 22 || accelHeldBack) && (ret & 0xFF) != 0 &&
-            strcmp(hook.name, "RTHardware::initializeTtl") == 0)
-        {
-            BCLOG("BC250HWL", "level 22: TTL initialized the GPU (every SWIP up); reported failed so the accelerator's "
-                              "own setup does not run yet");
-            ret = 0;
-        }
-        // Level 24: VCN2's engine (AMDNavi10Hardware +0x3f0, slot 8 of the engines initializeHWEngines inits) is
-        // dropped: VCN is a stub and power-gated on the BC-250. The engine loop skips empty slots.
-        if (surveyLevel >= 24 && (ret & 0xFF) != 0 && strcmp(hook.name, "Navi10Hardware::allocateHWEngines") == 0) {
+        // Without the accelerator register hooks its setup would program the GPU unchecked: initializeTtl is reported
+        // failed, so init stops cleanly and tears TTL down.
+        if (accelHeldBack && (ret & 0xFF) != 0 && strcmp(hook.name, "RTHardware::initializeTtl") == 0) { ret = 0; }
+        // VCN2's engine (AMDNavi10Hardware +0x3f0) is dropped: VCN is a stub and power-gated on the BC-250. The
+        // accelerator's start requires engine 8 (VCN) when capability +0x87 is set and engine 5 when +0x84 is
+        // (getHWEngine, hardware vtable +0x310); the capabilities (vtable +0x158) are cleared for the empty slots.
+        if ((ret & 0xFF) != 0 && strcmp(hook.name, "Navi10Hardware::allocateHWEngines") == 0) {
             auto& vcn = getMember<OSObject*>(a, kVcnEngineSlot);
             if (vcn != nullptr) {
-                BCLOG("BC250HWL", "level 24: VCN2 engine %p (%s) removed", vcn, className(vcn));
                 vcn->release();
                 vcn = nullptr;
             }
-            // Level 25: the accelerator's start requires engine 8 (VCN) when capability +0x87 is set and engine 5
-            // when +0x84 is (getHWEngine, hardware vtable +0x310), and fails on a missing one (third level 25 run).
-            // The capabilities (hardware vtable +0x158) are cleared for the engine slots left empty.
             auto* caps = reinterpret_cast<UInt8* (*)(void*)>((*reinterpret_cast<void***>(a))[kHwCapabilities / 8])(a);
             if (caps != nullptr) {
-                BCLOG("BC250HWL", "level 25: capabilities +0x84..+0x87 %u %u %u %u", caps[0x84], caps[0x85], caps[0x86],
-                    caps[0x87]);
                 if (getMember<void*>(a, kVcnEngineSlot) == nullptr) { caps[0x87] = 0; }
                 if (getMember<void*>(a, kEngineSlot5) == nullptr) { caps[0x84] = 0; }
             }
         }
-        // Level 24 stops after Hardware::init's engine init, before what follows it (display, the accelerator's start).
-        if ((surveyLevel == 24 || accelStopUnguarded) && (ret & 0xFF) != 0 && strcmp(hook.name, "Hardware::init") == 0)
-        {
-            BCLOG("BC250HWL", "level 24: Hardware::init done (engines initialized); reported failed so the accelerator "
-                              "does not start yet");
-            ret = 0;
-        }
-        if (hook.calls <= limit) {
-            if (hook.logClass) {
-                BCLOG("BC250HWL", "%s <<< %p (%s)", hook.name, reinterpret_cast<void*>(ret),
-                    className(reinterpret_cast<void*>(ret)));
-            }
-            else {
-                BCLOG("BC250HWL", "%s <<< 0x%llX", hook.name, ret);
-            }
-        }
+        // Without the stop and controller-request guards a late start failure panics: Hardware::init is reported
+        // failed instead, so the accelerator does not start.
+        if (accelStopUnguarded && (ret & 0xFF) != 0 && strcmp(hook.name, "Hardware::init") == 0) { ret = 0; }
         return ret;
     }
 
@@ -920,70 +369,7 @@ namespace
         return table[i];
     }
 
-    // Level 28: Lilu has 4 KB of trampoline space for the originals of every route of every plugin; with every survey
-    // hook installed it ran out and the last 24 accelerator hooks (from AccelEventMachine::eventTimeout on) were
-    // silently not patched (28q to 28v). From level 28 only the hooks that change something (runFrom set) and the
-    // ones below are installed; the others only logged the earlier levels' steps. The two level 28 overrides that
-    // were off since 28q without harm (28t reached the login screen on Apple's interrupt path) are opt-in:
-    // bc250poll=1 (fences polled, useTimestampInterrupts false) and bc250evto=1 (eventTimeout blocked).
-    bool hookWanted(const Hook& hook)
-    {
-        if (surveyLevel < 28) { return true; }
-        UInt32 opt = 0;
-        if (strcmp(hook.name, "Hardware::useTimestampInterrupts") == 0) {
-            PE_parse_boot_argn("bc250poll", &opt, sizeof(opt));
-            return opt != 0;
-        }
-        if (strcmp(hook.name, "AccelEventMachine::eventTimeout") == 0) {
-            PE_parse_boot_argn("bc250evto", &opt, sizeof(opt));
-            return opt != 0;
-        }
-        if (hook.runFrom != 0) { return true; }
-        constexpr const char* kKeep[] = {"Accelerator::start", "Hardware::init", "Navi10Hardware::allocateHWEngines",
-            "GFX10Hardware::initHWInfo", "Hardware::isDeviceValid", "HWChannel::timeStampInterruptCallback",
-            "AccelDisplayPipe::processTransactionInterrupt", "Framebuffer::registerForInterruptType",
-            "InterruptEvent::notifyCallback", "AccelTask::reportVmFault",
-            "GFX10Hardware::writeVMProtectionFaultDiagnosisReport", "GFX10VMM::writeVmFaultProtectionString"};
-        for (const auto* keep : kKeep) {
-            if (strcmp(hook.name, keep) == 0) { return true; }
-        }
-        return false;
-    }
-
-    // HWLibs' firmware directory: every firmware image it registers, and for which device type. The functions are
-    // stripped and found by the same patterns as in X5000HWLibs; a pattern that is missing or matches more than once
-    // is skipped. File names are printed only if they point into HWLibs.
-    const UInt8 kCreateFirmwarePattern[]     = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54,
-            0x53, 0x40, 0x89, 0xC0, 0x41, 0x89, 0xD0, 0x41, 0x89, 0xF0, 0x40, 0x89, 0xF0, 0xBF, 0x20, 0x00, 0x00, 0x00,
-            0xE8};
-    const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF};
-    const UInt8 kPutFirmwarePattern[]        = {0x55, 0x48, 0x89, 0xE5, 0x83, 0xFE, 0x00, 0x7F};
-    const UInt8 kPutFirmwarePatternMask[]    = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF};
-
-    mach_vm_address_t orgCreateFirmware = 0, orgPutFirmware = 0;
     mach_vm_address_t hwlibsStart = 0, hwlibsEnd = 0;
-    UInt32            createFirmwareCalls = 0, putFirmwareCalls = 0;
-
-    void* wrapCreateFirmware(const void* data, UInt32 size, UInt32 ipVersion, const char* filename)
-    {
-        auto* ret = FunctionCast(wrapCreateFirmware, orgCreateFirmware)(data, size, ipVersion, filename);
-        if (++createFirmwareCalls <= 400) {
-            const auto name = reinterpret_cast<mach_vm_address_t>(filename);
-            BCLOG("BC250HWL", "createFirmware %s size 0x%X ip 0x%X -> %p",
-                name >= hwlibsStart && name < hwlibsEnd ? filename : "(name outside HWLibs)", size, ipVersion, ret);
-        }
-        return ret;
-    }
-
-    // Extra registers are passed through in case the masked pattern found a function with more arguments.
-    bool wrapPutFirmware(void* dir, UInt32 deviceType, void* fw, void* d, void* e, void* f)
-    {
-        const auto ret = FunctionCast(wrapPutFirmware, orgPutFirmware)(dir, deviceType, fw, d, e, f);
-        if (++putFirmwareCalls <= 400) { BCLOG("BC250HWL", "putFirmware type %u %p -> %d", deviceType, fw, ret); }
-        return ret;
-    }
 
     // Returns the only match of the pattern in the kext, or 0.
     mach_vm_address_t findUnique(const UInt8* pattern, const UInt8* mask, size_t length, mach_vm_address_t slide,
@@ -1013,28 +399,6 @@ namespace
             patcher.clearError();
         }
         return findUnique(pattern, nullptr, length, slide, size);
-    }
-
-    void hookFirmwareDirectory(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
-    {
-        hwlibsStart = slide;
-        hwlibsEnd   = slide + size;
-        const auto create =
-            findUnique(kCreateFirmwarePattern, kCreateFirmwarePatternMask, sizeof(kCreateFirmwarePattern), slide, size);
-        const auto put =
-            findUnique(kPutFirmwarePattern, kPutFirmwarePatternMask, sizeof(kPutFirmwarePattern), slide, size);
-        BCLOG("BC250HWL", "createFirmware at %s0x%llX, putFirmware at %s0x%llX", create ? "+" : "(none) ",
-            create ? create - slide : 0, put ? "+" : "(none) ", put ? put - slide : 0);
-        if (create != 0) {
-            KernelPatcher::RouteRequest request {nullptr, wrapCreateFirmware, orgCreateFirmware};
-            request.from = create;
-            if (!patcher.routeMultiple(id, &request, 1)) { patcher.clearError(); }
-        }
-        if (put != 0) {
-            KernelPatcher::RouteRequest request {nullptr, wrapPutFirmware, orgPutFirmware};
-            request.from = put;
-            if (!patcher.routeMultiple(id, &request, 1)) { patcher.clearError(); }
-        }
     }
 
     // AMDHardware::unmapDoorbellMemory (14.8.9) calls through the handler at this+0x18 without checking it, and free()
@@ -1334,7 +698,6 @@ namespace
     // 22-24). Every request from the accelerator is logged.
     constexpr UInt32 kControllerReleaseServices = 0xB;
     mach_vm_address_t orgControllerDrvrFunction = 0;
-    UInt32            controllerDrvrCalls       = 0;
 
     IOReturn wrapControllerDrvrFunction(void* controller, UInt32 function, void* p1, void* p2, void* p3)
     {
@@ -1344,32 +707,7 @@ namespace
                 function);
             return kIOReturnSuccess;
         }
-        const auto ret =
-            FunctionCast(wrapControllerDrvrFunction, orgControllerDrvrFunction)(controller, function, p1, p2, p3);
-        if (++controllerDrvrCalls <= 64) {
-            BCLOG("BC250HWL", "Controller::callPlatformFunctionFromDrvr(0x%X, %p, %p, %p)%s <<< 0x%X", function, p1, p2,
-                p3, accelInStart ? " (in accelerator start)" : "", ret);
-        }
-        return ret;
-    }
-
-    // Level 25: the last step of the accelerator's start asks the framebuffer controller (accelerator +0x1f40) for a
-    // platform function named by the OSSymbol at +0x1f48 (controller vtable +0x6b8, callPlatformFunction; start fails
-    // unless it returns 0: the third level 25 run). Every platform function asked of the controller is logged.
-    mach_vm_address_t orgControllerPlatformFunction = 0;
-    UInt32            controllerPlatformCalls       = 0;
-
-    IOReturn wrapControllerPlatformFunction(void* controller, const OSSymbol* function, bool wait, void* p1, void* p2,
-        void* p3, void* p4)
-    {
-        const auto ret = FunctionCast(wrapControllerPlatformFunction, orgControllerPlatformFunction)(controller,
-            function, wait, p1, p2, p3, p4);
-        if (++controllerPlatformCalls <= 64) {
-            BCLOG("BC250HWL", "Controller::callPlatformFunction(%s, %d, %p, %p)%s <<< 0x%X",
-                function != nullptr ? function->getCStringNoCopy() : "null", wait, p1, p2,
-                accelInStart ? " (in accelerator start)" : "", ret);
-        }
-        return ret;
+        return FunctionCast(wrapControllerDrvrFunction, orgControllerDrvrFunction)(controller, function, p1, p2, p3);
     }
 
     // Level 28: GPU statistics for the usual monitoring tools (Activity Monitor, iStat, HWMonitor), which read the
@@ -1403,22 +741,6 @@ namespace
         put("Fan Speed(%)", getMember<UInt32>(hw, kHwPmFanPercent));
     }
 
-    // Level 25: every platform function asked of the accelerator, by name (who powers the hardware up, and when).
-    mach_vm_address_t orgAccelPlatformFunction = 0;
-    UInt32            accelPlatformCalls       = 0;
-
-    IOReturn wrapAccelPlatformFunction(void* accel, const OSSymbol* function, bool wait, void* p1, void* p2, void* p3,
-        void* p4)
-    {
-        const auto ret =
-            FunctionCast(wrapAccelPlatformFunction, orgAccelPlatformFunction)(accel, function, wait, p1, p2, p3, p4);
-        if (++accelPlatformCalls <= 64) {
-            BCLOG("BC250HWL", "Accelerator::callPlatformFunction(%s, %d, %p, %p) <<< 0x%X",
-                function != nullptr ? function->getCStringNoCopy() : "null", wait, p1, p2, ret);
-        }
-        return ret;
-    }
-
     void guardUnmapDoorbellMemory(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
         const auto fn = patcher.solveSymbol(id, "__ZN26AMDRadeonX6000_AMDHardware19unmapDoorbellMemoryEv", slide, size);
@@ -1438,39 +760,6 @@ namespace
             BCLOG("BC250HWL", "unmapDoorbellMemory guard failed to route");
             patcher.clearError();
         }
-    }
-
-    // HWLibs debug output, as DebugEnabler does for X5000HWLibs (both patterns occur once in X6000HWLibs 14.8.9):
-    // the MCIL debug level (PP_Log and CAIL messages) is forced to 0xFF, and every PSP event log is printed.
-    const UInt8 kMcilDebugLevelPattern[]     = {0x48, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8B, 0x40, 0x60, 0x48, 0x8D};
-    const UInt8 kMcilDebugLevelPatternMask[] = {0xFE, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    const UInt8 kMcilDebugLevelPatched[]     = {0x66, 0x90, 0x66, 0x90, 0x90, 0xB8, 0xFF, 0x00, 0x00, 0x00, 0x48, 0x8D};
-    const UInt8 kPspLogPattern[] = {0x83, 0x00, 0x02, 0x0F, 0x85, 0x00, 0x00, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x83, 0x00, 0x02, 0x72, 0x00, 0x41, 0x00, 0x00, 0x09, 0x02, 0x18, 0x00, 0x74, 0x00, 0x41, 0x00, 0x00,
-        0x01, 0x06, 0x10, 0x00, 0x0f, 0x85, 0x00, 0x00, 0x00, 0x00};
-    const UInt8 kPspLogMask[] = {0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
-    const UInt8 kPspLogPatched[] = {0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90,
-        0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66,
-        0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x66, 0x90, 0x90};
-    static_assert(sizeof(kPspLogPattern) == sizeof(kPspLogMask) && sizeof(kPspLogPattern) == sizeof(kPspLogPatched));
-
-    void patchUnique(const char* name, const UInt8* pattern, const UInt8* mask, const UInt8* patched, size_t length,
-        mach_vm_address_t slide, size_t size)
-    {
-        const auto at = findUnique(pattern, mask, length, slide, size);
-        if (at == 0) {
-            BCLOG("BC250HWL", "%s: pattern not found once; not patched", name);
-            return;
-        }
-        if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
-            BCLOG("BC250HWL", "%s: cannot enable kernel writing", name);
-            return;
-        }
-        memcpy(reinterpret_cast<void*>(at), patched, length);
-        MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-        BCLOG("BC250HWL", "%s: patched at +0x%llX", name, at - slide);
     }
 
     // TTL's bgm_create requires the IP-discovery binary_header.version_major (at header+4) to be 1, but the BC-250's
@@ -4091,82 +3380,6 @@ namespace
 
     bool accelWritesLive() { return accelLive && gvmLive && gvmFbOffset != 0; }
 
-    // 28z: the GC hub's fault (status, address, VMID) and the faulting VMID's page-table walk from VRAM, read through
-    // MM_INDEX/MM_DATA: context n's CNTL (0x1620 + n; depth [2:1], block size [6:3]), page-table base (0x168B + 2n),
-    // start/end (0x16AB/0x16CB + 2n, in pages). Non-leaf levels index 9 bits, the leaf 9 + block size bits of the page
-    // number relative to the start; a PDE with bit 54 is a PTE (huge page). Entries hold carve-out physical addresses.
-    bool vmRead64(UInt64 phys, UInt64* value)
-    {
-        if (gvmFbOffset == 0 || phys < gvmFbOffset || phys + 8 > gvmFbOffset + gvmFbSize) { return false; }
-        return NRed::singleton().readVRAM(phys - gvmFbOffset, value, sizeof(*value));
-    }
-
-    void vmFaultWalk()
-    {
-        auto         r      = [](UInt32 off) { return NRed::singleton().readReg32(0x1260 + off); };
-        const UInt32 status = r(0x15EC), lo = r(0x15ED), hi = r(0x15EE);
-        const UInt64 va     = (static_cast<UInt64>(lo) << 12) | (static_cast<UInt64>(hi & 0xF) << 44);
-        const UInt32 vmid   = (status >> 20) & 0xF;
-        const UInt32 cntl   = r(0x1620 + vmid);
-        const UInt64 pdb    = (static_cast<UInt64>(r(0x168C + 2 * vmid)) << 32) | r(0x168B + 2 * vmid);
-        const UInt64 start  = (static_cast<UInt64>(r(0x16AC + 2 * vmid) & 0xF) << 32) | r(0x16AB + 2 * vmid);
-        const UInt64 end    = (static_cast<UInt64>(r(0x16CC + 2 * vmid) & 0xF) << 32) | r(0x16CB + 2 * vmid);
-        flightRecord(kFlightFault, status, va, vmid);
-        BCLOG("BC250HWL", "VM fault: status 0x%08X (VMID %u, CID %u, %s, permission 0x%X, mapping %u), VA 0x%llX; "
-                          "context CNTL 0x%08X, PDB 0x%llX, pages 0x%llX-0x%llX",
-            status, vmid, (status >> 9) & 0x7F, (status & 0x10000) ? "write" : "read", (status >> 4) & 0xF,
-            (status >> 8) & 1, va, cntl, pdb, start, end);
-        gcCpBrief("VM fault");
-        // 28z3: Apple's tables (28z's walk): the PTB's entries each cover 2^BFS pages (the PDE's block fragment size,
-        // bits 63:59; 4 = 64 KB), and an entry with bit 56 (translate further) points at a sub-table (bits 47:6) of
-        // 2^BFS 4 KB PTEs.
-        const UInt32 depth = (cntl >> 1) & 3, ptbBits = 9 + ((cntl >> 3) & 0xF);
-        const UInt64 vpn   = (va >> 12) - start;
-        UInt64       base  = pdb & 0x0000FFFFFFFFF000ULL;
-        UInt32       bfs   = 0;
-        for (SInt32 level = static_cast<SInt32>(depth); level >= 0; level--) {
-            const UInt32 shift = level == 0 ? bfs : ptbBits + 9 * static_cast<UInt32>(level - 1);
-            UInt64       index = vpn >> shift;
-            if (level == 0) {
-                index &= (1ULL << (ptbBits - bfs)) - 1;
-            }
-            else if (level != static_cast<SInt32>(depth)) {
-                index &= 0x1FF;
-            }
-            UInt64 entry = 0;
-            if (!vmRead64(base + index * 8, &entry)) {
-                BCLOG("BC250HWL", "VM fault: level %d table 0x%llX index 0x%llX: not in the carve-out", level, base, index);
-                return;
-            }
-            BCLOG("BC250HWL", "VM fault: level %d table 0x%llX index 0x%llX: entry 0x%016llX", level, base, index, entry);
-            if (level == 0 || (entry & (1ULL << 54)) != 0) {
-                UInt64       near[8] = {};
-                const UInt64 first   = index >= 2 ? index - 2 : 0;
-                for (UInt32 i = 0; i < 8; i++) { vmRead64(base + (first + i) * 8, &near[i]); }
-                BCLOG("BC250HWL", "VM fault: entries 0x%llX..: %016llX %016llX %016llX %016llX %016llX %016llX %016llX "
-                                  "%016llX",
-                    first, near[0], near[1], near[2], near[3], near[4], near[5], near[6], near[7]);
-                if (level == 0 && (entry & 1) != 0 && (entry & (1ULL << 56)) != 0 && bfs != 0) {
-                    const UInt64 sub = entry & 0x0000FFFFFFFFFFC0ULL, subIndex = vpn & ((1ULL << bfs) - 1);
-                    UInt64       pte[16] = {};
-                    for (UInt32 i = 0; i < 16 && i < (1U << bfs); i++) { vmRead64(sub + i * 8, &pte[i]); }
-                    BCLOG("BC250HWL", "VM fault: sub-table 0x%llX index 0x%llX: entry 0x%016llX", sub, subIndex,
-                        pte[subIndex & 15]);
-                    BCLOG("BC250HWL", "VM fault: sub-table 0x%llX: %016llX %016llX %016llX %016llX %016llX %016llX "
-                                      "%016llX %016llX",
-                        sub, pte[0], pte[1], pte[2], pte[3], pte[4], pte[5], pte[6], pte[7]);
-                    BCLOG("BC250HWL", "VM fault: sub-table 0x%llX +8: %016llX %016llX %016llX %016llX %016llX %016llX "
-                                      "%016llX %016llX",
-                        sub, pte[8], pte[9], pte[10], pte[11], pte[12], pte[13], pte[14], pte[15]);
-                }
-                return;
-            }
-            if ((entry & 1) == 0) { return; }
-            bfs  = static_cast<UInt32>(entry >> 59);
-            base = entry & 0x0000FFFFFFFFFFC0ULL;
-        }
-    }
-
     // Level 28: the accelerator's own page tables (per-process VMIDs). AMDGFX10VMM::getPDEValue(level, address) and
     // getPTEValue(level, address, flags, fragment) mask the address in and add flags only; both the CPU and the SDMA
     // (updateContiguousPTEsWithDMAUsingAddr) paths take their entries from them (VMM vtable +0x1D8/+0x1E0). A PDE
@@ -4250,7 +3463,6 @@ namespace
             BCLOG("BC250HWL", "VMM: DMA entries at 0x%llX x%llu: addr 0x%llX -> 0x%llX, flags 0x%llX -> 0x%llX, incr 0x%llX",
                 pe, count, givenAddr, addr, givenFlags, flags, incr);
         }
-        flightRecord(kFlightPtes, pe, count, addr, flags);
         return FunctionCast(wrapUpdatePtesDma, orgUpdatePtesDma)(ctx, pe, count, addr, flags, incr);
     }
 
@@ -4270,7 +3482,6 @@ namespace
         const UInt64 base  = vramPhys(given & ~0xFFFULL) | (given & 0xFFF);
         packet[2]          = static_cast<UInt32>(base);
         packet[3]          = static_cast<UInt32>(base >> 32);
-        flightRecord(kFlightMapProcess, base, packet[1]);
         if (++vmMapProcessLogged <= kVmEntryLogMax) {
             BCLOG("BC250HWL", "VMM: MAP_PROCESS (HIQ): page-table base 0x%llX -> 0x%llX (ordinal 2 0x%08X)", given, base,
                 packet[1]);
@@ -4394,59 +3605,6 @@ namespace
             gvmFbOffset);
     }
 
-    // 28z7: Firefox's GPU helper writes to VA 0x400004000, which Apple reports ALLOCATED, while the PTB entry for
-    // that 64 KB block was written empty through SDMA. Every map/unmap in the first 1 MB of an address space is
-    // logged, with the PTB writes to the first entries of a table page (above).
-    mach_vm_address_t orgMapVa = 0, orgUnmapVa = 0;
-
-    UInt64 wrapMapVa(void* context, UInt64 va, void* memory, UInt64 offset, UInt64 size, UInt64 flags)
-    {
-        const UInt64 ret = FunctionCast(wrapMapVa, orgMapVa)(context, va, memory, offset, size, flags);
-        flightRecord(kFlightMapVa, reinterpret_cast<UInt64>(context), va, size,
-            (flags << 32) | (strstr(className(memory), "SysMemory") ? 1 : 0) | (ret << 8));
-        return ret;
-    }
-
-    UInt64 wrapUnmapVa(void* context, UInt64 va, UInt64 size)
-    {
-        const UInt64 ret = FunctionCast(wrapUnmapVa, orgUnmapVa)(context, va, size);
-        flightRecord(kFlightUnmapVa, reinterpret_cast<UInt64>(context), va, size);
-        return ret;
-    }
-
-    // The PM4 and DMA channels' submitCommandBuffer are stubs that tail-jump through a RIP-relative vtable load
-    // (not relocatable: routing them panicked in 28z8's first build); both land in AMDHWChannel's.
-    // 28z9: the VMID handover. AMDHWVMM::waitForVMID(hub, context) picks a VMID (LRU among +0xA90..+0xA94) and, when
-    // it belongs to another context, waits for the slot's last-use event (slot +0x98; slots at hub * 0x500 +
-    // vmid * 0x50 + 0x90 = owner). assignVMID(context, &vmid, channel, &event, &flag) programs it.
-    mach_vm_address_t orgWaitForVmid = 0, orgAssignVmid = 0;
-
-    UInt32 wrapWaitForVmid(void* vmm, UInt32 hub, void* context)
-    {
-        const UInt32 vmid  = FunctionCast(wrapWaitForVmid, orgWaitForVmid)(vmm, hub, context);
-        void*        owner = vmid < 16 ? getMember<void*>(vmm, hub * 0x500 + vmid * 0x50 + 0x90) : nullptr;
-        flightRecord(kFlightWaitVmid, reinterpret_cast<UInt64>(context), hub, vmid, reinterpret_cast<UInt64>(owner));
-        return vmid;
-    }
-
-    UInt64 wrapAssignVmid(void* vmm, void* context, UInt32* vmid, void* channel, void** event, bool* flag)
-    {
-        const UInt64 ret = FunctionCast(wrapAssignVmid, orgAssignVmid)(vmm, context, vmid, channel, event, flag);
-        flightRecord(kFlightAssignVmid, reinterpret_cast<UInt64>(context), reinterpret_cast<UInt64>(channel),
-            vmid ? *vmid : 0xFF, (event && *event) ? reinterpret_cast<UInt64>(*event) : 0);
-        return ret;
-    }
-
-    mach_vm_address_t orgSubmit = 0;
-
-    UInt64 wrapSubmit(void* channel, void* info)
-    {
-        const bool dma = strstr(className(channel), "SDMA") != nullptr;
-        flightRecord(dma ? kFlightSubmitDma : kFlightSubmitPm4, reinterpret_cast<UInt64>(channel),
-            getMember<UInt32>(channel, 0x80), getMember<UInt32>(channel, 0x84));
-        return FunctionCast(wrapSubmit, orgSubmit)(channel, info);
-    }
-
     void wrapPrepareVmInvalidate(void* vmm, UInt32* request, const UInt8* info, bool alt)
     {
         FunctionCast(wrapPrepareVmInvalidate, orgPrepareVmInvalidate)(vmm, request, info, alt);
@@ -4455,8 +3613,6 @@ namespace
         const UInt64 base  = vramPhys(given & ~0xFFFULL) | (given & 0xFFF);
         request[1]         = static_cast<UInt32>(base);
         request[3]         = static_cast<UInt32>(base >> 32);
-        flightRecord(kFlightVmProgram, getMember<UInt32>(const_cast<UInt8*>(info), 0),
-            getMember<UInt32>(const_cast<UInt8*>(info), 4), base);
         if (++vmPdbLogged <= kVmEntryLogMax) {
             BCLOG("BC250HWL", "VMM: VM program (hub %u, VMID %u): PDB reg 0x%X/0x%X = 0x%llX -> 0x%llX",
                 getMember<UInt32>(const_cast<UInt8*>(info), 0), getMember<UInt32>(const_cast<UInt8*>(info), 4),
@@ -4549,8 +3705,6 @@ namespace
 
     UInt32 wrapSdmaVmInvalidate(void* channel, UInt32* buf, const void* range, const UInt32* vmids)
     {
-        flightRecord(kFlightInvalidate, reinterpret_cast<UInt64>(channel), vmids ? vmids[0] : 0,
-            buf != nullptr ? 1 : 0);
         const bool gc       = vmids != nullptr && vmids[0] != 0 && accelInvalidateAsGvm();
         const auto* tmpl    = gc && channel != nullptr ? sdmaGcInvTemplate(channel) : nullptr;
         const auto  extra   = tmpl != nullptr ? kSdmaGcInvDwords - kSdmaGpuvmInvDwords : 0;
@@ -4726,16 +3880,6 @@ namespace
                 patcher.clearError();
             }
         }
-        diagRingStatus = patcher.solveSymbol(id,
-            "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine33writeGPURingStatusDiagnosisReportERPcRj", slide, size);
-        diagPipelineStatus = patcher.solveSymbol(id,
-            "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine37writeGPUPipelineStatusDiagnosisReportERPcRj", slide, size);
-        diagVmFault = patcher.solveSymbol(id,
-            "__ZN31AMDRadeonX6000_AMDGFX10Hardware37writeVMProtectionFaultDiagnosisReportERPcRj", slide, size);
-        patcher.clearError();
-        BCLOG("BC250HWL", "level 28: fault reports: ring status %s, pipeline status %s, VM fault %s",
-            diagRingStatus ? "found" : "missing", diagPipelineStatus ? "found" : "missing",
-            diagVmFault ? "found" : "missing");
         KernelPatcher::RouteRequest profiler {"__ZN33AMDRadeonX6000_AMDChannelProfiler9configureEbyy",
             wrapProfilerConfigure, orgProfilerConfigure};
         if (!patcher.routeMultiple(id, &profiler, 1, slide, size)) {
@@ -4772,30 +3916,6 @@ namespace
             {"__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel20fillMapProcessPacketEP19PM4_MES_MAP_PROCESSyyjjj",
                 wrapFillMapProcess, orgFillMapProcess},
         };
-        UInt32 flight = 0;
-        PE_parse_boot_argn("bc250flight", &flight, sizeof(flight));
-        if (flight != 0) {
-            KernelPatcher::RouteRequest recorder[] = {
-                {"__ZN29AMDRadeonX6000_AMDHWVMContext5mapVAEyP13IOAccelMemoryyyN24AMDRadeonX6000_IAMDHWVMM10VmMapFlagsE",
-                    wrapMapVa, orgMapVa},
-                {"__ZN29AMDRadeonX6000_AMDHWVMContext7unmapVAEyy", wrapUnmapVa, orgUnmapVa},
-                {"__ZN27AMDRadeonX6000_AMDHWChannel19submitCommandBufferEP30AMD_SUBMIT_COMMAND_BUFFER_INFO", wrapSubmit,
-                    orgSubmit},
-                {"__ZN23AMDRadeonX6000_AMDHWVMM11waitForVMIDE16eAMD_VM_HUB_TYPEP30AMDRadeonX6000_IAMDHWVMContext",
-                    wrapWaitForVmid, orgWaitForVmid},
-                {"__ZN23AMDRadeonX6000_AMDHWVMM10assignVMIDEP30AMDRadeonX6000_IAMDHWVMContextRjP30AMDRadeonX6000_"
-                 "AMDAccelChannelPP12IOAccelEventPb",
-                    wrapAssignVmid, orgAssignVmid},
-            };
-            if (patcher.routeMultiple(id, recorder, arrsize(recorder), slide, size) && orgMapVa != 0 && orgSubmit != 0) {
-                flightOn = true;
-                BCLOG("BC250HWL", "level 28: flight recorder on (/private/var/log/bc250.flight.log)");
-            }
-            else {
-                BCLOG("BC250HWL", "level 28: flight recorder hooks NOT installed");
-                patcher.clearError();
-            }
-        }
         UInt32 ptCpu = 1;
         PE_parse_boot_argn("bc250ptcpu", &ptCpu, sizeof(ptCpu));
         if (ptCpu != 0) {
@@ -5131,84 +4251,6 @@ namespace
         }
     }
 
-    // Level 28 (28r): which interrupts the GPU puts in the IH ring (OSSSYS 5.0.1 at 0x10A0; the framebuffer's
-    // interrupt manager owns and consumes it). Read beside it from the log thread: every new (client, source, ring)
-    // is logged with its whole IV (8 dwords, IH 5: dw0 client [7:0], source [15:8], ring [23:16], VMID [27:24]), and
-    // the counts every 5 s when they changed. The ring's base is a system (bus) address.
-    struct IhCount
-    {
-        UInt32 key;
-        UInt32 count;
-    };
-    IhCount       ihCounts[48];
-    UInt32        ihKeys = 0, ihTotal = 0, ihReported = 0, ihPolls = 0, ihLast = 0;
-    UInt64        ihBase = 0;
-    UInt32        ihSize = 0;
-    IOMemoryMap*  ihMap  = nullptr;
-    const UInt32* ihRing = nullptr;
-
-    void ihPollRing()
-    {
-        constexpr UInt32 kIh = 0x10A0;
-        auto&            nred = NRed::singleton();
-        if (nred.getMMIOLength() == 0) { return; }
-        const UInt32 cntl = nred.readReg32(kIh + 0x80);
-        const UInt64 base = (static_cast<UInt64>(nred.readReg32(kIh + 0x82) & 0xFF) << 40) |
-                            (static_cast<UInt64>(nred.readReg32(kIh + 0x81)) << 8);
-        const UInt32 size = 4U << ((cntl >> 1) & 0x1F);
-        if ((cntl & 1) == 0 || base == 0 || size < 0x1000 || size > 0x100000) { return; }
-        if (base != ihBase || size != ihSize) {
-            OSSafeReleaseNULL(ihMap);
-            ihRing   = nullptr;
-            ihBase   = base;
-            ihSize   = size;
-            auto* md = IOMemoryDescriptor::withPhysicalAddress(static_cast<IOPhysicalAddress>(base), size, kIODirectionIn);
-            if (md != nullptr) {
-                ihMap = md->map(kIOMapReadOnly);
-                md->release();
-            }
-            if (ihMap != nullptr) { ihRing = reinterpret_cast<const UInt32*>(ihMap->getVirtualAddress()); }
-            ihLast = nred.readReg32(kIh + 0x84) & (size - 1) & ~0x1FU;
-            BCLOG("BC250HWL", "IH: ring 0x%llX, %u bytes (IH_RB_CNTL 0x%08X), %s, start at 0x%X", base, size, cntl,
-                ihRing ? "mapped" : "NOT mapped", ihLast);
-        }
-        if (ihRing == nullptr) { return; }
-        const UInt32 wptr = nred.readReg32(kIh + 0x84) & (size - 1) & ~0x1FU;
-        UInt32       n    = 0;
-        while (ihLast != wptr && n < size / 32) {
-            const UInt32* iv  = ihRing + ihLast / 4;
-            const UInt32  key = iv[0] & 0xFFFFFF;
-            UInt32        k   = 0;
-            while (k < ihKeys && ihCounts[k].key != key) { k++; }
-            if (k == ihKeys && ihKeys < arrsize(ihCounts)) {
-                ihCounts[ihKeys++] = {key, 0};
-                BCLOG("BC250HWL", "IH: new client 0x%X source 0x%X ring 0x%X vmid %u at 0x%X: %08X %08X %08X %08X %08X "
-                                  "%08X %08X %08X",
-                    key & 0xFF, (key >> 8) & 0xFF, key >> 16, (iv[0] >> 24) & 0xF, ihLast, iv[0], iv[1], iv[2], iv[3],
-                    iv[4], iv[5], iv[6], iv[7]);
-            }
-            if (k < ihKeys) { ihCounts[k].count++; }
-            ihTotal++;
-            n++;
-            ihLast = (ihLast + 32) & (size - 1);
-        }
-        if (++ihPolls % 25 == 0 && ihTotal != ihReported) {
-            char   line[640];
-            size_t pos = 0;
-            for (UInt32 k = 0; k < ihKeys && pos + 32 < sizeof(line); k++) {
-                pos += snprintf(line + pos, sizeof(line) - pos, " %X/%X/%X:%u", ihCounts[k].key & 0xFF,
-                    (ihCounts[k].key >> 8) & 0xFF, ihCounts[k].key >> 16, ihCounts[k].count);
-            }
-            BCLOG("BC250HWL", "IH: %u IVs (+%u), RPTR 0x%X WPTR 0x%X; client/source/ring:count%s", ihTotal,
-                ihTotal - ihReported, nred.readReg32(kIh + 0x83), nred.readReg32(kIh + 0x84), line);
-            pos = 0;
-            for (UInt32 k = 0; k < irqEventKinds && pos + 24 < sizeof(line); k++) {
-                pos += snprintf(line + pos, sizeof(line) - pos, " %X:%u", irqEvents[k].type, irqEvents[k].count);
-            }
-            BCLOG("BC250HWL", "IRQ events dispatched (type:count):%s", irqEventKinds ? line : " none");
-            ihReported = ihTotal;
-        }
-    }
 }    // namespace
 
 // Freed VRAM goes to IOGraphicsAccelerator2's orphaned-memory pool at +0xBC8 (IOAccelVidMemory::orphanIt ->
@@ -5218,12 +4260,10 @@ namespace
 // allocMemory then fails without releasing it. Opening many apps at 4K left 1.3-2.4 GB there with 7-80 MB of VRAM
 // free and thousands of "Failed to allocate". A non-reusable buffer goes to the other list and kicks the collector,
 // which frees it. Bit 28 is cleared (bc250vramreuse=1 keeps it) so freed VRAM is returned at once: no reuse cache;
-// buffers created before the accelerator is found keep their flag. Logged every 10 calls: config word, flags (+0xC78), collector
-// tick (+0xBC), each pool's bytes (+0x50), limit (+0x48) and timeout (+0x10). Tahoe 26.7.1 layout.
+// buffers created before the accelerator is found keep their flag. Tahoe 26.7.1 layout.
 void BC250HWL::accelPoolTick()
 {
     static IOService* accel = nullptr;
-    static UInt32     calls = 0, lines = 0;
     if (accel == nullptr) {
         auto* match = IOService::serviceMatching("IOGraphicsAccelerator2");
         if (match == nullptr) { return; }
@@ -5238,69 +4278,25 @@ void BC250HWL::accelPoolTick()
         BCLOG("BC250HWL", "accelerator %s: config 0x%08X -> 0x%08X (VRAM reuse %s)", accel->getMetaClass()->getClassName(),
             was, config, (config & 0x10000000U) != 0 ? "on" : "off");
     }
-    if (++calls % 10 != 0 || ++lines > 400) { return; }
-    BCLOG("BC250HWL", "orphan pools: config 0x%08X flags 0x%X tick %u | +0xB60 %llu MiB, limit %llu MiB, timeout %u | "
-                      "+0xBC8 %llu MiB (non-reusable %llu MiB), limit 0x%llX, timeout %u",
-        getMember<UInt32>(accel, 0xC90), getMember<UInt32>(accel, 0xC78), getMember<UInt32>(accel, 0xBC),
-        getMember<UInt64>(accel, 0xB60 + 0x50) >> 20, getMember<UInt64>(accel, 0xB60 + 0x48) >> 20,
-        getMember<UInt32>(accel, 0xB60 + 0x10), getMember<UInt64>(accel, 0xBC8 + 0x50) >> 20,
-        getMember<UInt64>(accel, 0xBC8 + 0x58) >> 20, getMember<UInt64>(accel, 0xBC8 + 0x48),
-        getMember<UInt32>(accel, 0xBC8 + 0x10));
 }
 
-size_t BC250HWL::flightDump(char* out, size_t capacity)
+// 28x: SDMA1 never raises its trap (no client 9 source 0xE0 IV): its SDMA_CNTL TRAP_ENABLE (bit 0) stays clear while
+// SDMA0's is set once the accelerator enables its SDMA0 trap interrupt (IRQMgr), so SDMA1's fences complete unseen
+// (channel 14 timeouts, the display pipe's transactions waiting on them). Mirrored from SDMA0 every 0.2 s
+// (bc250sdma1trap=0 disables).
+void BC250HWL::sdma1TrapPoll()
 {
-    static const char* const kNames[] = {"?", "mapVA", "unmapVA", "PTEs", "VMprog", "MAP_PROC", "inval", "irq",
-        "submitGFX", "submitDMA", "FAULT", "waitVMID", "assignVMID"};
-    const SInt32 next = flightNext;
-    if (!flightOn || next == 0 || out == nullptr || capacity < 256) { return 0; }
-    size_t pos   = static_cast<size_t>(snprintf(out, capacity, "flight: %d events, now %llu ms\n", next,
-        mach_absolute_time() / 1000000));
-    const UInt32 count = next < static_cast<SInt32>(kFlightSize) ? static_cast<UInt32>(next) : kFlightSize;
-    for (UInt32 n = 0; n < count && pos + 160 < capacity; n++) {
-        const auto& e = flight[(static_cast<UInt32>(next) - count + n) % kFlightSize];
-        if (e.kind == 0 || e.kind > kFlightAssignVmid) { continue; }
-        pos += static_cast<size_t>(snprintf(out + pos, capacity - pos, "[%llu.%06llu] thr %08X %-9s %llX %llX %llX %llX\n",
-            e.time / 1000000000ULL, (e.time / 1000ULL) % 1000000ULL, e.cpu, kNames[e.kind], e.a, e.b, e.c, e.d));
-    }
-    return pos;
-}
-
-void BC250HWL::ihPoll()
-{
-    // The IH ring reader follows the flight recorder (set when the accelerator loads, after this thread starts)
-    // unless bc250ih is given.
-    static SInt32 ihArg = -2, mirror = -1;
+    static SInt32 mirror = -1;
     if (mirror < 0) {
-        UInt32 ih = 0, trap = 1;
-        ihArg  = PE_parse_boot_argn("bc250ih", &ih, sizeof(ih)) ? (ih != 0 ? 1 : 0) : -1;
+        UInt32 trap = 1;
         PE_parse_boot_argn("bc250sdma1trap", &trap, sizeof(trap));
         mirror = trap != 0;
     }
-    const bool enabled = ihArg >= 0 ? ihArg == 1 : flightOn;
-    if (surveyLevel < 28) { return; }
-    // 28x: SDMA1 never raises its trap (no client 9 source 0xE0 IV): its SDMA_CNTL TRAP_ENABLE (bit 0) stays clear
-    // while SDMA0's is set once the accelerator enables its SDMA0 trap interrupt (IRQMgr), so SDMA1's fences complete
-    // unseen (channel 14 timeouts, the display pipe's transactions waiting on them). Mirrored from SDMA0 here
-    // (bc250sdma1trap=0 disables).
     auto& nred = NRed::singleton();
-    if (mirror && nred.getMMIOLength() != 0) {
-        constexpr UInt32 kSdma0Cntl = 0x127C, kSdma1Cntl = 0x187C;
-        const UInt32     s0 = nred.readReg32(kSdma0Cntl), s1 = nred.readReg32(kSdma1Cntl);
-        if ((s0 & 1) != 0 && (s1 & 1) == 0 && s1 != 0xFFFFFFFF) {
-            nred.writeReg32(kSdma1Cntl, s1 | 1);
-            static UInt32 mirrored = 0;
-            if (mirrored++ < 4) {
-                BCLOG("BC250HWL", "SDMA1 trap enabled as SDMA0's: SDMA1_CNTL 0x%08X -> 0x%08X (SDMA0_CNTL 0x%08X)", s1,
-                    nred.readReg32(kSdma1Cntl), s0);
-            }
-        }
-    }
-    if (enabled) { ihPollRing(); }
-    // 28z11: every 5 s the GPU's state (CP halt bits, GFX ring pointers, fetcher, VM fault status, SDMA pointers):
-    // the GFX engine went silent ~80 s into a Firefox run with no fault interrupt (faults now go to the default page).
-    static UInt32 briefPolls = 0;
-    if (flightOn && ++briefPolls % 25 == 0 && nred.getMMIOLength() != 0) { gcCpBrief("periodic"); }
+    if (!mirror || nred.getMMIOLength() == 0) { return; }
+    constexpr UInt32 kSdma0Cntl = 0x127C, kSdma1Cntl = 0x187C;
+    const UInt32     s0 = nred.readReg32(kSdma0Cntl), s1 = nred.readReg32(kSdma1Cntl);
+    if ((s0 & 1) != 0 && (s1 & 1) == 0 && s1 != 0xFFFFFFFF) { nred.writeReg32(kSdma1Cntl, s1 | 1); }
 }
 
 // HWLibs knows the BC-250 neither in its firmware device type table ("Unable to find matching firmware device type
@@ -5432,7 +4428,8 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
     if (kext == Kext::Accel && surveyLevel < 4) { return; }
 
     if (kext == Kext::HWLibs) {
-        hookFirmwareDirectory(patcher, id, slide, size);
+        hwlibsStart = slide;
+        hwlibsEnd   = slide + size;
         if (surveyLevel >= 2) { patchHWLibsTables(slide, size); }
         if (surveyLevel >= 6) {
             patchTtlAsicTable(slide, size);
@@ -5440,12 +4437,6 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
         if (surveyLevel >= 8) { hookTlsSwInit(patcher, id, slide, size); }
         if (surveyLevel >= 7) { hookBgmCreate(patcher, id, slide, size); }
-        if (surveyLevel >= 5) {
-            patchUnique("MCIL debug level", kMcilDebugLevelPattern, kMcilDebugLevelPatternMask, kMcilDebugLevelPatched,
-                sizeof(kMcilDebugLevelPattern), slide, size);
-            patchUnique("PSP event log", kPspLogPattern, kPspLogMask, kPspLogPatched, sizeof(kPspLogPattern), slide,
-                size);
-        }
     }
     if (kext == Kext::Accel) { guardUnmapDoorbellMemory(patcher, id, slide, size); }
     if (kext == Kext::Accel && surveyLevel >= 27) {
@@ -5486,13 +4477,6 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             patcher.clearError();
             accelStopUnguarded = true;
         }
-        KernelPatcher::RouteRequest platformRequest {
-            "__ZN34AMDRadeonX6000_AmdRadeonController20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_",
-            wrapControllerPlatformFunction, orgControllerPlatformFunction};
-        if (!patcher.routeMultiple(id, &platformRequest, 1, slide, size)) {
-            BCLOG("BC250HWL", "level 25: controller callPlatformFunction not hooked");
-            patcher.clearError();
-        }
     }
     if (kext == Kext::Accel && surveyLevel >= 28) {
         UInt32 stats = 1;
@@ -5510,13 +4494,6 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
     }
     if (kext == Kext::Accel && surveyLevel >= 25) {
-        KernelPatcher::RouteRequest request {
-            "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_",
-            wrapAccelPlatformFunction, orgAccelPlatformFunction};
-        if (!patcher.routeMultiple(id, &request, 1, slide, size)) {
-            BCLOG("BC250HWL", "level 25: accelerator callPlatformFunction not hooked");
-            patcher.clearError();
-        }
         KernelPatcher::RouteRequest stopRequest {"__ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService",
             wrapAccelStop, orgAccelStop};
         if (!patcher.routeMultiple(id, &stopRequest, 1, slide, size)) {
@@ -5527,31 +4504,14 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
     }
 
-    UInt32 skipped = 0;
     for (size_t i = 0; i < arrsize(hooks); i++) {
         auto& hook = hooks[i];
         if (hook.kext != kext) { continue; }
-        if (!hookWanted(hook)) {
-            skipped++;
-            continue;
-        }
         KernelPatcher::RouteRequest request {hook.symbol, wrapperFor(i, MakeSeq<arrsize(hooks)>::Type {}),
             hook.org};
-        if (patcher.routeMultiple(id, &request, 1, slide, size) && hook.org != 0) {
-            BCLOG("BC250HWL", "hooked %s", hook.name);
-        }
-        else if (hook.org == 0) {
-            // Lilu reports the route made even when it had no trampoline space left for the original (4 KB for every
-            // route of every plugin): the function is then not patched at all.
-            BCLOG("BC250HWL", "%s NOT hooked (%s; Lilu's trampoline space used up?)", hook.name, hook.symbol);
+        if (!patcher.routeMultiple(id, &request, 1, slide, size) || hook.org == 0) {
+            BCLOG("BC250HWL", "%s not hooked", hook.name);
             patcher.clearError();
         }
-        else {
-            BCLOG("BC250HWL", "no %s (%s)", hook.name, hook.symbol);
-            patcher.clearError();
-        }
-    }
-    if (skipped != 0) {
-        BCLOG("BC250HWL", "level 28: %u logging-only hooks of this kext not installed (Lilu's trampoline space)", skipped);
     }
 }
