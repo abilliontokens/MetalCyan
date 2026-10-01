@@ -42,7 +42,8 @@ For a complete EFI, see [BC-250-Hackintosh-OpenCore](https://github.com/amethyst
 
 ## Install
 
-Copy `MetalCyan.kext` to `EFI/OC/Kexts` and add it to `Kernel > Add` after Lilu. The EFI repo uses `npci=0x3000`
+Download `MetalCyan-1.0.0-RELEASE.zip` from [Releases](https://github.com/amethyst8118/MetalCyan/releases/tag/v1.0.0)
+(or build it, below). Copy `MetalCyan.kext` to `EFI/OC/Kexts` and add it to `Kernel > Add` after Lilu. The EFI repo uses `npci=0x3000`
 in boot-args as well.
 
 ## Boot-args
@@ -129,10 +130,12 @@ Xcode's. The zip ends up in `build-linux/Release/`.
 - Linux's amdgpu driver, the reference for nearly every hardware fix here.
 - linux-firmware for the cyan_skillfish2 microcode (`MetalCyan/Firmware`, under `LICENSE.amdgpu`).
 - The SMU tooling, all of which the SMU code follows (facts only, no code copied from the 40 CU unlock):
-  - bc250-collective/bc250_smu for the mailbox
-  - rw-r-r-0644 for the core unlock
-  - bc250_smu_oc for the CPU voltage model
-  - duggasco/bc250-40cu-unlock for the 40 CU unlock
+  - [bc250-collective/bc250_smu_oc](https://github.com/bc250-collective/bc250_smu_oc): its `bc250_smu` package for
+    the mailbox, and the CPU voltage model
+  - [rw-r-r-0644/bc250-core-unlock](https://github.com/rw-r-r-0644/bc250-core-unlock) for the core unlock
+  - [rw-r-r-0644/bc250-smu-unlock](https://github.com/rw-r-r-0644/bc250-smu-unlock) for the SMU firmware patches the
+    EFI's unlock driver applies
+  - [duggasco/bc250-40cu-unlock](https://github.com/duggasco/bc250-40cu-unlock) for the 40 CU unlock
 
 ## License
 

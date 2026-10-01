@@ -3,9 +3,9 @@
 // Copyright © 2026 NootedRed-BC250 contributors. Licensed under the Thou Shalt Not Profit License version 1.5.
 // See LICENSE for details.
 //
-// The SMU (MP1) is reached as the BC-250 community tools reach it (bc250-collective/bc250_smu, MIT): the SMN
-// index/data pair at 0xB8/0xBC in the host bridge's (00:00.0) PCI config space, and one command/response/argument
-// mailbox per queue. Telemetry only: an allowlist of read-only messages, polled once a second by a kernel thread,
+// The SMU (MP1) is reached as the BC-250 community tools reach it (bc250_smu in bc250-collective/bc250_smu_oc,
+// MIT): the SMN index/data pair at 0xB8/0xBC in the host bridge's (00:00.0) PCI config space, and one
+// command/response/argument mailbox per queue. Telemetry only: an allowlist of read-only messages, polled once a second by a kernel thread,
 // published as the GPU's "BC250,SMU" property and `sysctl debug.bc250.smu`. `bc250smu=0` disables it.
 //
 // Tuning (all opt-in boot-args, off by default, clamped to the community's limits, every message logged):

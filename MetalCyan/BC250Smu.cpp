@@ -3,8 +3,8 @@
 // Copyright © 2026 NootedRed-BC250 contributors. Licensed under the Thou Shalt Not Profit License version 1.5.
 // See LICENSE for details.
 //
-// Mailbox addresses, message IDs and encodings follow bc250-collective/bc250_smu (MIT), which documents the BC-250's
-// SMU queues from its firmware's descriptor table.
+// Mailbox addresses, message IDs and encodings follow bc250_smu in bc250-collective/bc250_smu_oc (MIT), which
+// documents the BC-250's SMU queues from its firmware's descriptor table.
 
 #include <BC250.hpp>
 #include <BC250HWL.hpp>
