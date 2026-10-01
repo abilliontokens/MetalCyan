@@ -1,0 +1,23 @@
+// Version-independent interface to the `AMDRadeonX5000_AMDHWMemory` class
+//
+// Copyright © 2025 ChefKiss. Licensed under the Thou Shalt Not Profit License version 1.5.
+// See LICENSE for details.
+
+#pragma once
+#include <PenguinWizardry/KernelVersion.hpp>
+#include <PenguinWizardry/ObjectField.hpp>
+
+class AMDRadeonX5000_AMDHWMemory
+{
+    struct Constants
+    {
+        ObjectField<UInt64 (*)(AMDRadeonX5000_AMDHWMemory*)> vtGetVisibleSize;
+
+        Constants() { this->vtGetVisibleSize = currentKernelVersion() >= MACOS_11 ? 0x1D8 : 0x1F8; }
+    };
+
+    static Constants constants;
+
+public:
+    auto getVisibleSize() { return constants.vtGetVisibleSize(getMember<void*>(this, 0))(this); }
+};

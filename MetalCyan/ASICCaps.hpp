@@ -1,0 +1,17 @@
+// CAIL DDI Capabilities per ASIC
+//
+// Copyright © 2024-2025 ChefKiss. Licensed under the Thou Shalt Not Profit License version 1.5.
+// See LICENSE for details.
+
+#pragma once
+#include <IOKit/IOTypes.h>
+
+static const UInt32 ddiCapsRaven[16]   = {0x800005,   0x500011FE, 0x80000,    0x11001000, 0x200,     0x68000001,
+                                          0x20000000, 0x4002,     0x22420001, 0x9E20E10,  0x2000120, 0x0,
+                                          0x0,        0x0,        0x0,        0x0};
+static const UInt32 ddiCapsRenoir[16]  = {0x800005,   0x500011FE, 0x80000,    0x11001000, 0x200,     0x68000001,
+                                          0x20000000, 0x4002,     0x22420001, 0x9E20E18,  0x2000120, 0x0,
+                                          0x0,        0x0,        0x0,        0x0};
+static const UInt32 ddiCapsRenoirE[16] = {0x800005,   0x500011FE, 0x80000,    0x11001000, 0x200,     0x68000001,
+                                          0x20000000, 0x4002,     0x22420001, 0x9E60E18,  0x2000120, 0x0,
+                                          0x0,        0x0,        0x0,        0x0};

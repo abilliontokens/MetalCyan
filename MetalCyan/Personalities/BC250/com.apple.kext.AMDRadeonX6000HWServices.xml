@@ -1,0 +1,23 @@
+<array>
+	<dict>
+		<key>CFBundleIdentifier</key>
+		<string>com.apple.kext.AMDRadeonX6000HWServices</string>
+		<key>IOClass</key>
+		<string>AMDRadeonX6000_AMDRadeonHWServicesNavi</string>
+		<key>IOMatchCategory</key>
+		<string>AMDRadeonX6000HWServices</string>
+		<key>IOPCIMatch</key>
+		<string>0x13FE1002 0x143F1002</string>
+		<key>IOPCITunnelCompatible</key>
+		<true/>
+		<key>IOProbeScore</key>
+		<integer>65051</integer>
+		<key>IOPropertyMatch</key>
+		<dict>
+			<key>LoadHWServices</key>
+			<true/>
+		</dict>
+		<key>IOProviderClass</key>
+		<string>IOPCIDevice</string>
+	</dict>
+</array>

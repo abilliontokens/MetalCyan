@@ -1,0 +1,24 @@
+// Version-independent interface to the `AMDRadeonX5000_AMDHWRegisters` class
+//
+// Copyright © 2025 ChefKiss. Licensed under the Thou Shalt Not Profit License version 1.5.
+// See LICENSE for details.
+
+#pragma once
+#include <Headers/kern_util.hpp>
+#include <IOKit/IOTypes.h>
+
+class AMDRadeonX5000_AMDHWRegisters
+{
+public:
+    auto read(const UInt32 off)
+    {
+        auto vtable = getMember<void*>(this, 0);
+        return getMember<UInt32 (*)(void*, UInt32)>(vtable, 0x118)(this, off);
+    }
+
+    void write(const UInt32 off, const UInt32 val)
+    {
+        auto vtable = getMember<void*>(this, 0);
+        getMember<void (*)(void*, UInt32, UInt32)>(vtable, 0x120)(this, off, val);
+    }
+};

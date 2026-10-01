@@ -1,0 +1,70 @@
+// AMD GPU Platform Security Processor
+//
+// Copyright © 2024-2025 ChefKiss. Licensed under the Thou Shalt Not Profit License version 1.5.
+// See LICENSE for details.
+
+#pragma once
+
+enum AMDPSPCommand
+{
+    kPSPCommandLoadTA   = 1,
+    kPSPCommandLoadASD  = 4,
+    kPSPCommandLoadIPFW = 6,
+};
+
+enum AMDPSPFirmwareID
+{
+    kPSPFirmwareUnknown,
+    kPSPFirmwareSMU,
+    kPSPFirmwareCE,
+    kPSPFirmwarePFP,
+    kPSPFirmwareME,
+    kPSPFirmwareMEC1JT,
+    kPSPFirmwareMEC2JT,
+    kPSPFirmwareMEC1,
+    kPSPFirmwareMEC2,
+    kPSPFirmwareMES,
+    kPSPFirmwareMESStack,
+    kPSPFirmwareRLC,
+    kPSPFirmwareSDMA0,
+    kPSPFirmwareSDMA1,
+    kPSPFirmwareVCN0,
+    kPSPFirmwareUVD,
+    kPSPFirmwareUVD1,
+    kPSPFirmwareVCE,
+    kPSPFirmwareISP,
+    kPSPFirmwareDMCUERAM,
+    kPSPFirmwareDMCUISR,
+    kPSPFirmwareRLCV,
+    kPSPFirmwareRLCP,
+    kPSPFirmwareRLCSRListGPM,
+    kPSPFirmwareRLCSRListSRM,
+    kPSPFirmwareRLCSRListCntl,
+    kPSPFirmwareRLCLX6IRAM,
+    kPSPFirmwareRLCLX6DRAM,
+    kPSPFirmwareRLCVCN0DRAM,
+    kPSPFirmwareRLCVCN1DRAM,
+    kPSPFirmwareGlobalTapDelays,
+    kPSPFirmwareSE0TapDelays,
+    kPSPFirmwareSE1TapDelays,
+    kPSPFirmwareSE2TapDelays,
+    kPSPFirmwareSE3TapDelays,
+    kPSPFirmwareDMCUB,
+    kPSPFirmwareSDMA2,
+    kPSPFirmwareSDMA3,
+    kPSPFirmwareSDMA4,
+    kPSPFirmwareSDMA5,
+    kPSPFirmwareSDMA6,
+    kPSPFirmwareSDMA7,
+    kPSPFirmwareVCN1,
+    kPSPFirmwareDriverCap,
+    kPSPFirmwareIMUInstruction,
+    kPSPFirmwareIMUData,
+    kPSPFirmwareSDMAThread0,
+    kPSPFirmwareSDMAThread1,
+    kPSPFirmwarePPTable,
+    kPSPFirmwareRS64MES,
+    kPSPFirmwareRS64MESStack,
+    kPSPFirmwareRS64KIQ,
+    kPSPFirmwareRS64KIQStack,
+};
