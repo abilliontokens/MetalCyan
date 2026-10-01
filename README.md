@@ -42,7 +42,7 @@ For a complete EFI, see [BC-250-Hackintosh-OpenCore](https://github.com/amethyst
 
 ## Install
 
-Download `MetalCyan-1.0.0-RELEASE.zip` from [Releases](https://github.com/amethyst8118/MetalCyan/releases/tag/v1.0.0)
+Download `MetalCyan-1.0.1-RELEASE.zip` from [Releases](https://github.com/amethyst8118/MetalCyan/releases/tag/v1.0.1)
 (or build it, below). Copy `MetalCyan.kext` to `EFI/OC/Kexts` and add it to `Kernel > Add` after Lilu. The EFI repo uses `npci=0x3000`
 in boot-args as well.
 
@@ -53,7 +53,7 @@ in boot-args as well.
 | `-MCOff` | Don't load. You get the firmware framebuffer, no acceleration. |
 | `-MCDebug` | Lilu debug logging (DEBUG builds). |
 | `-MCBeta` | Load on macOS versions newer than the ones tested. |
-| `bc250cu=40` | Enable all 40 CUs (stock is 24). Only applied if every shader array reads the stock harvest value. |
+| `bc250cu=40` | Enable all 40 CUs (stock is 24). Only applied if every shader array reads the stock harvest value. Needs 1.0.1 or newer: 1.0.0 still ran 24. |
 | `bc250gfxmhz=N` | GPU clock, 350-2000 MHz. Above 2000 the SMU firmware stops answering, so higher values are ignored. |
 | `bc250gfxmv=N` | GPU voltage, 700-1100 mV, used with `bc250gfxmhz`. At most 50 mV below the stock curve for that clock. |
 | `bc250cpumhz=N` | CPU boost clock, 3500-4500 MHz. Always comes with an undervolt worked out from `bc250cpuvmax`. |
@@ -67,8 +67,15 @@ Clocks and voltages are applied 60 seconds after boot, so a bad setting can't st
 always get to the desktop and take it out again. If the SMU stops responding (telemetry frozen, CPU stuck at one
 clock), remove the setting and power off for 10 seconds. A restart isn't enough.
 
-What one board runs daily, with the 8-core unlock: `bc250cu=40 bc250gfxmhz=2000 bc250gfxmv=1080 bc250cpumhz=4000
-bc250cpuvmax=1300`.
+With all 40 CUs running, 2000 MHz / 1080 mV got Tctl to 88 °C within a minute of GPU load, and the SMU pulled the CPU
+down to 1400 MHz to stay under 90. A lower GPU clock is the better deal: 40 CUs at 1500 MHz still beat 24 at 2000 on
+paper.
+
+## Changes
+
+- 1.0.1: `bc250cu=40` now actually gives 40 CUs. The RLC firmware puts the fused harvest back when it starts, so 1.0.0's
+  unlock was undone a moment after it was written and the GPU kept running 24 CUs. The unlock is now written again
+  right after the RLC start. Measured with a Metal FMA test at 2000 MHz: 6.1 TFLOPS before, 10.1 after.
 
 ## Logs
 

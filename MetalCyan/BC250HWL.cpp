@@ -1782,11 +1782,11 @@ namespace
         return loaded;
     }
 
-    void gcUnlockCus(void* gc);
+    void gcUnlockCus(void* gc, bool rlcStarted);
 
     UInt32 wrapGcHwInit(void* gc, void* input, void* output)
     {
-        gcUnlockCus(gc);
+        gcUnlockCus(gc, false);
         return FunctionCast(wrapGcHwInit, orgGcHwInit)(gc, input, output);
     }
 
@@ -1916,6 +1916,7 @@ namespace
         IODelay(50);
         if ((gcReadReg(gc, kRlcCntl) & kRlcEnableF32) == 0) { BCLOG("BC250HWL", "GC: RLC did not start"); }
         IODelay(1000);    // Kept from the bring-up, where the start was followed by 1 ms of status reads.
+        gcUnlockCus(gc, true);
     }
 
     // bc250cu=40: the 40-CU unlock the BC-250 community uses on Linux (duggasco/bc250-40cu-unlock; facts only, no code
@@ -1924,12 +1925,14 @@ namespace
     // (0x7) disable the rest. Before GC's hw_init reads them (it counts CUs per SE/SA, as Linux's constants_init
     // does before the RLC starts), each SA gets CC_GC_SHADER_ARRAY_CONFIG = 0, SPI_PG_ENABLE_STATIC_WGP_MASK = 0x1F and
     // RLC_PG_ALWAYS_ON_WGP_MASK = 0x1F. Only boards whose every SA reads the stock harvest 0xFFF80000 are changed
-    // (anything else may be a real defect). The GPU draws more power (+30 W at 1500 MHz on Linux); a lower GPU clock
-    // (bc250gfxmhz) is the community's sweet spot (1500 MHz / 900 mV).
-    void gcUnlockCus(void* gc)
+    // (anything else may be a real defect). The RLC firmware puts the fuse harvest and the SPI mask (0x7) back as it
+    // starts (RLC_PG_ALWAYS_ON_WGP_MASK is kept), so the unlock is written again right after the RLC start, before the
+    // CP runs anything; written only at hw_init (1.0.0), the GPU ran 24 CUs. The GPU draws more power (+30 W at
+    // 1500 MHz on Linux); a lower GPU clock (bc250gfxmhz) is the community's sweet spot (1500 MHz / 900 mV).
+    void gcUnlockCus(void* gc, bool rlcStarted)
     {
         static UInt32 target = 0;
-        static bool   parsed = false;
+        static bool   parsed = false, applied = false;
         if (!parsed) {
             parsed = true;
             PE_parse_boot_argn("bc250cu", &target, sizeof(target));
@@ -1938,7 +1941,7 @@ namespace
                 target = 0;
             }
         }
-        if (target != 40) { return; }
+        if (target != 40 || (rlcStarted && !applied)) { return; }
         constexpr UInt32 kGrbmGfxIndex = 0xA000 + 0x2200, kCcShaderArrayConfig = 0x1260 + 0x100F,
                          kSpiStaticWgpMask = 0x1260 + 0x1277, kRlcAlwaysOnWgpMask = 0xA000 + 0x4C53,
                          kBroadcastAll = 0xE0000000, kInstanceBroadcast = 0x40000000, kStockHarvest = 0xFFF80000,
@@ -1958,8 +1961,11 @@ namespace
         if (!stock) {
             gcWriteReg(gc, kGrbmGfxIndex, kBroadcastAll);
             const bool unlocked = ((before[0][0] | before[0][1] | before[1][0] | before[1][1]) & 0x001F0000) == 0;
-            BCLOG("BC250HWL", "bc250cu=40: harvest %08X %08X %08X %08X is %s; not changed", before[0][0], before[0][1],
-                before[1][0], before[1][1], unlocked ? "already 40 CUs" : "not the stock 0xFFF80000");
+            if (rlcStarted && unlocked) { return; }
+            applied = unlocked;    // Still 40 CUs from before a restart: the RLC start resets it all the same.
+            BCLOG("BC250HWL", "bc250cu=40%s: harvest %08X %08X %08X %08X is %s; not changed",
+                rlcStarted ? " after the RLC start" : "", before[0][0], before[0][1], before[1][0], before[1][1],
+                unlocked ? "already 40 CUs" : "not the stock 0xFFF80000");
             return;
         }
         for (UInt32 se = 0; se < kSes; se++) {
@@ -1968,9 +1974,13 @@ namespace
                 gcWriteReg(gc, kCcShaderArrayConfig, 0);
                 gcWriteReg(gc, kSpiStaticWgpMask, kAllWgps);
                 gcWriteReg(gc, kRlcAlwaysOnWgpMask, kAllWgps);
+                if (rlcStarted && (gcReadReg(gc, kCcShaderArrayConfig) & 0x001F0000) != 0) {
+                    BCLOG("BC250HWL", "bc250cu=40: SE%u SA%u harvest did not change after the RLC start", se, sa);
+                }
             }
         }
         gcWriteReg(gc, kGrbmGfxIndex, kBroadcastAll);
+        applied = true;
     }
 
     UInt32 wrapGcRlcAutoloadCheck(void* gc)

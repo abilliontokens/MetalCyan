@@ -8,7 +8,7 @@
 
 PRODUCT_NAME   := MetalCyan
 MODULE_NAME    := com.amethyst8118.MetalCyan
-MODULE_VERSION := 1.0.0
+MODULE_VERSION := 1.0.1
 CONFIG         ?= Debug
 
 CLANG  ?= $(firstword $(foreach c,clang-21 clang-20 clang-19 clang,$(shell command -v $(c) 2>/dev/null)))
