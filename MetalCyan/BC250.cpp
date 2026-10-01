@@ -192,7 +192,6 @@ void BC250::processPatcher()
         this->mode = Mode::Probe;
     }
     this->hwlSurvey = this->mode == Mode::Framebuffer;
-    this->hwlLevel  = 28;
     if (this->hwlSurvey) { bc250StartPollThread(); }
 
     // SMU telemetry (read-only messages; bc250smu=0 disables): GPU/CPU clocks, voltages, Tctl, core mask.

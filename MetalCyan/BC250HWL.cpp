@@ -83,7 +83,7 @@ namespace
             0, 0},
     };
 
-    UInt32 surveyLevel = 1;
+    bool amdKextsLoaded = false;    // Set when the first AMD kext loads; the GPU is up from then on.
     bool   accelInStart = false;    // Inside AMDGraphicsAccelerator::start (its failure path calls stop).
     bool   accelStopUnguarded = false;
     constexpr UInt32 kVcnEngineSlot = 0x3F0;    // AMDNavi10Hardware's VCN2 engine (allocateHWEngines).
@@ -228,7 +228,7 @@ namespace
         const UInt64 ret = FunctionCast(wrapStartInterrupts, orgStartInterrupts)(manager, workLoop);
         UInt32       timer = 1;
         PE_parse_boot_argn("bc250sdma1timer", &timer, sizeof(timer));
-        if (surveyLevel >= 28 && timer != 0 && sdma1KickEnabled() && workLoop != nullptr && sdma1Timer == nullptr) {
+        if (timer != 0 && sdma1KickEnabled() && workLoop != nullptr && sdma1Timer == nullptr) {
             sdma1WorkLoop = IOWorkLoop::workLoop();
             sdma1Timer    = IOTimerEventSource::timerEventSource(static_cast<OSObject*>(manager), sdma1TimerFired);
             if (sdma1WorkLoop != nullptr && sdma1Timer != nullptr &&
@@ -525,7 +525,7 @@ namespace
         const auto value = FunctionCast(wrapAccelRegRead, orgAccelRegRead)(regs, reg);
         if (accelIsInvalidate(reg)) {
             accelInvalidateReads++;
-            if (surveyLevel >= 27 && accelLive && reg >= kInvAckFirst && reg < kInvRangeFirst && value != 0 &&
+            if (accelLive && reg >= kInvAckFirst && reg < kInvRangeFirst && value != 0 &&
                 cpProbeAck < kCpProbeMax) {
                 cpProbeAck++;
                 BCLOG("BC250HWL", "Accel: VM invalidation ACK 0x%05X -> 0x%08X after %u ack reads", reg, value,
@@ -545,17 +545,17 @@ namespace
                 BCLOG("BC250HWL", "Accel%s: VM invalidation W 0x%05X = 0x%08X (%u invalidation writes, %u ack reads so far)",
                     accelLive ? "" : " dry", reg, value, accelInvalidateWrites, accelInvalidateReads);
             }
-            if (surveyLevel >= 27 && accelLive && accelInvalidateWrites <= 12) {
+            if (accelLive && accelInvalidateWrites <= 12) {
                 cpProbeReq++;    // Counted for the log only.
                 BCLOG("BC250HWL", "Accel: VM invalidation W 0x%05X = 0x%08X (%s)", reg, value,
                     reg < kInvAckFirst ? "REQ" : reg < kInvRangeFirst ? "ACK" : "ADDR_RANGE");
             }
-            if (accelLive && surveyLevel >= 27 && accelIsInvalidateReq(reg) && accelInvalidateAsGvm()) {
+            if (accelLive && accelIsInvalidateReq(reg) && accelInvalidateAsGvm()) {
                 accelInvalidateRequest(regs, reg, value);
             } else if (accelLive) {
                 FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value);
             }
-            if (surveyLevel >= 27 && accelLive && reg >= kInvReqFirst && reg < kInvAckFirst &&
+            if (accelLive && reg >= kInvReqFirst && reg < kInvAckFirst &&
                 accelInvalidateWrites <= 12) {
                 gcCpBrief("after invalidation REQ");
             }
@@ -564,7 +564,7 @@ namespace
         if (++accelWrites <= kAccelLogMax) {
             BCLOG("BC250HWL", "Accel%s: W 0x%05X = 0x%08X", accelLive ? "" : " dry", reg, value);
         }
-        if (accelWritesLive() && surveyLevel >= 27) {
+        if (accelWritesLive()) {
             // GCMC_VM_MX_L1_TLB_CNTL: the first write of initializeVmHardware (powerUp); the CP was found stuck
             // before the KIQ, so its state is taken here and after the VM setup's fault controls.
             if (reg == 0x1260 + 0x1727) { gcCpBrief("before initializeVmHardware"); }
@@ -580,7 +580,7 @@ namespace
                 return;
             }
         }
-        if (accelWritesLive() && surveyLevel >= 28 && accelIsContextCntl(reg) && (value & 1) != 0 &&
+        if (accelWritesLive() && accelIsContextCntl(reg) && (value & 1) != 0 &&
             accelContextFaultDefaults())
         {
             const UInt32 withDefaults = value | kContextFaultDefaults;
@@ -593,7 +593,7 @@ namespace
         }
         if (accelWritesLive() && accelIsPdb(reg) && accelPdbWrite(regs, reg, value)) { return; }
         if (accelWritesLive()) { FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value); }
-        if (accelWritesLive() && surveyLevel >= 27 && reg == kHdpFlushCntl && cpProbeHdp < kCpProbeMax) {
+        if (accelWritesLive() && reg == kHdpFlushCntl && cpProbeHdp < kCpProbeMax) {
             cpProbeHdp++;
             IODelay(100);
             gcCpBrief("after HDP flush");
@@ -812,17 +812,16 @@ namespace
         UInt32 type, major, minor, rev;
         UInt32 newMajor, newMinor, newRev;
         const char* name;
-        UInt32 fromLevel;
     };
     constexpr IpRemap kIpRemaps[] = {
-        {0x42, 2, 1, 1, 2, 3, 0, "NBIF", 7},
-        {0x3D, 4, 2, 0, 4, 1, 0, "PCIE", 7},
-        {0x07, 11, 0, 8, 11, 0, 0, "SMUIO", 7},
-        {0x46, 8, 1, 1, 8, 0, 0, "UMC", 10},
-        {0x0B, 10, 1, 3, 10, 1, 10, "GC", 10},
-        {0x22, 5, 0, 1, 5, 0, 0, "HDP", 10},
-        {0x1B, 2, 0, 3, 2, 0, 0, "MMHUB", 10},
-        {0x1C, 2, 0, 3, 2, 0, 0, "ATHUB", 10},
+        {0x42, 2, 1, 1, 2, 3, 0, "NBIF"},
+        {0x3D, 4, 2, 0, 4, 1, 0, "PCIE"},
+        {0x07, 11, 0, 8, 11, 0, 0, "SMUIO"},
+        {0x46, 8, 1, 1, 8, 0, 0, "UMC"},
+        {0x0B, 10, 1, 3, 10, 1, 10, "GC"},
+        {0x22, 5, 0, 1, 5, 0, 0, "HDP"},
+        {0x1B, 2, 0, 3, 2, 0, 0, "MMHUB"},
+        {0x1C, 2, 0, 3, 2, 0, 0, "ATHUB"},
     };
 
     // The parsed topology: entry count at +0x1C, then 0x260-byte entries from +0x20 of {UInt32 type; ...; UInt32 major
@@ -876,7 +875,7 @@ namespace
             auto& rev   = getMember<UInt32>(entry, 0x10);
             BCLOG("BC250HWL", "topology[%u]: type 0x%X version %u.%u.%u", i, type, major, minor, rev);
             for (const auto& remap : kIpRemaps) {
-                if (type != remap.type || surveyLevel < remap.fromLevel) { continue; }
+                if (type != remap.type) { continue; }
                 if (major != remap.major || minor != remap.minor || rev != remap.rev) {
                     BCLOG("BC250HWL", "topology: %s is %u.%u.%u, not %u.%u.%u; left alone", remap.name, major, minor,
                         rev, remap.major, remap.minor, remap.rev);
@@ -906,7 +905,7 @@ namespace
             BCLOG("BC250HWL", "bgm_create <<< 0x%X", ret);
             return ret;
         }
-        if (surveyLevel >= 8 && tlsStopInstalled) {
+        if (tlsStopInstalled) {
             BCLOG("BC250HWL", "bgm_create <<< 0 (succeeded)");
             return ret;
         }
@@ -996,11 +995,6 @@ namespace
 
     UInt64 wrapIpiInitIpInterfaces(void* tls, UInt32 count, void* list)
     {
-        if (surveyLevel < 9) {
-            BCLOG("BC250HWL", "IpiInitializeIpInterfaces(%p, %u SWIPs, %p): level 8 stops here, returning 0", tls,
-                count, list);
-            return 0;
-        }
         const auto ret = FunctionCast(wrapIpiInitIpInterfaces, orgIpiInitIpInterfaces)(tls, count, list);
         BCLOG("BC250HWL", "IpiInitializeIpInterfaces(%u SWIPs) <<< 0x%llX", count, ret);
         return ret;
@@ -1026,11 +1020,6 @@ namespace
         for (UInt32 i = 0; i < count && i < 32 && used + 5 < sizeof(ids); i++) {
             used += snprintf(ids + used, sizeof(ids) - used, "%s%u", i ? "," : "",
                 getMember<UInt32>(tls, kTlsSwipIds + i * sizeof(UInt32)));
-        }
-        if (surveyLevel < 10) {
-            BCLOG("BC250HWL", "TlsExecuteIpEntrySeq(event %u, %u SWIPs: %s): level 9 stops here, returning 0", event,
-                count, ids);
-            return 0;
         }
         BCLOG("BC250HWL", "TlsExecuteIpEntrySeq(event %u, %u SWIPs: %s) >>>", event, count, ids);
         const auto ret = FunctionCast(wrapTlsExecuteIpEntrySeq, orgTlsExecuteIpEntrySeq)(tls, event, c);
@@ -1272,21 +1261,12 @@ namespace
 
     // The furthest SWIP of the boot order a level lets run hw_init: GVM from level 13, PSP from 15, GC from 18, SDMA
     // from 20.
-    UInt32 hwLimit()
-    {
-        return surveyLevel >= 22 ? kAllHwPosition :
-               surveyLevel >= 20 ? kSdmaHwPosition :
-               surveyLevel >= 18 ? kGcHwPosition :
-               surveyLevel >= 15 ? kPspHwPosition :
-                                   kGvmHwPosition;
-    }
+    UInt32 hwLimit() { return kAllHwPosition; }
     UInt32 swipHwInitialised = 0;    // Bit per SWIP id whose hw_init ran.
 
     bool swipStubbed(UInt32 swip)
     {
-        if (surveyLevel < 11) { return false; }
-        if (swip == kSwipDmcu) { return surveyLevel >= 12; }
-        if (swip == kSwipMes) { return surveyLevel >= 22; }
+        if (swip == kSwipDmcu || swip == kSwipMes) { return true; }
         for (const auto s : kStubbedSwips) {
             if (s == swip) { return true; }
         }
@@ -1295,7 +1275,6 @@ namespace
 
     bool swipAllowedToHwInit(UInt32 swip)
     {
-        if (surveyLevel < 12) { return false; }
         for (UInt32 i = 0; i < arrsize(kSwipBootOrder) && i < hwAllowed; i++) {
             if (kSwipBootOrder[i] == swip) { return true; }
         }
@@ -1329,7 +1308,7 @@ namespace
         }
         if (!run) {
             BCLOG("BC250HWL", "SWIP %u (%s) event %u: refused (bc250swip=%u, bc250hw=%u)", swip, swipName(swip), event,
-                swipAllowed, surveyLevel >= 12 ? hwAllowed : 0);
+                swipAllowed, hwAllowed);
             return 0;
         }
         BCLOG("BC250HWL", "SWIP %u (%s) event %u >>>", swip, swipName(swip), event);
@@ -1381,11 +1360,9 @@ namespace
             NRed::singleton().setProp32(s.name, s.value);
             BCLOG("BC250HWL", "CAIL setting %s = %u", s.name, s.value);
         }
-        if (surveyLevel >= 13) {
-            for (const auto& s : kCailSettingsGvm) {
-                NRed::singleton().setProp32(s.name, s.value);
-                BCLOG("BC250HWL", "CAIL setting %s = 0x%X", s.name, s.value);
-            }
+        for (const auto& s : kCailSettingsGvm) {
+            NRed::singleton().setProp32(s.name, s.value);
+            BCLOG("BC250HWL", "CAIL setting %s = 0x%X", s.name, s.value);
         }
     }
 
@@ -1704,12 +1681,10 @@ namespace
         gvmLive = true;
         BCLOG("BC250HWL", "level 14: GVM writes are made; FB offset 0x%llX added to its addresses below 0x%llX",
             gvmFbOffset, gvmFbSize);
-        if (surveyLevel >= 27) {
-            UInt32 retry = 0;
-            PE_parse_boot_argn("bc250retry", &retry, sizeof(retry));
-            gvmNoRetry = retry == 0;
-            BCLOG("BC250HWL", "level 27: VM context 0 fault retry %s", gvmNoRetry ? "off (as Linux)" : "on (Apple's)");
-        }
+        UInt32 retry = 0;
+        PE_parse_boot_argn("bc250retry", &retry, sizeof(retry));
+        gvmNoRetry = retry == 0;
+        BCLOG("BC250HWL", "level 27: VM context 0 fault retry %s", gvmNoRetry ? "off (as Linux)" : "on (Apple's)");
     }
 
     // Returns false if a write path could not be hooked; GVM's hw_init must then not run.
@@ -2311,16 +2286,16 @@ namespace
         }
         // Level 27: the PM4 engine's start halts the MEC (CP_MEC_CNTL MEC_ME1/ME2_HALT) when its KIQ does not answer;
         // the CP's state is captured first.
-        if (gcLive && surveyLevel >= 27 && a == kCpMecCntl && (b & kCpMecHalt) == kCpMecHalt) { gcCpSnapshot(gc); }
+        if (gcLive && a == kCpMecCntl && (b & kCpMecHalt) == kCpMecHalt) { gcCpSnapshot(gc); }
         // The CP before the KIQ's MEC is unhalted and once its queue is enabled, before SET_RESOURCES: shows whether
         // the fetcher (CPF, shared by GFX and compute) is already busy, e.g. on the GFX ring.
-        if (gcLive && surveyLevel >= 27 && a == kCpMecCntl && b == 0) {
+        if (gcLive && a == kCpMecCntl && b == 0) {
             gcCpBrief("before MEC unhalt");
             pspRingStatusDump();
         }
         UInt64 ret = 0;
         if (gcLive) { ret = reinterpret_cast<UInt64 (*)(void*, UInt64, UInt64, UInt64, UInt64)>(*Org)(gc, a, b, c, d); }
-        if (gcLive && surveyLevel >= 27 && a == kCpPqStatus) {
+        if (gcLive && a == kCpPqStatus) {
             IODelay(1000);
             gcCpBrief("KIQ enabled, 1 ms");
         }
@@ -4007,41 +3982,33 @@ namespace
         }
         // From level 9 the stop moves to TlsExecuteIpEntrySeq, and the SMU firewall must be in place as well.
         mach_vm_address_t execSeq = 0, smuWrite = 0;
-        if (surveyLevel >= 9) {
-            execSeq  = findUnique(kTlsExecuteIpEntrySeqPattern, nullptr, sizeof(kTlsExecuteIpEntrySeqPattern), slide,
-                 size);
-            smuWrite = findUnique(kSmuCgsWritePattern, nullptr, sizeof(kSmuCgsWritePattern), slide, size);
-            if (execSeq == 0 || smuWrite == 0) {
-                BCLOG("BC250HWL", "level 9: TlsExecuteIpEntrySeq %s, smu_cgs_write_register %s; not hooked",
-                    execSeq ? "found" : "missing", smuWrite ? "found" : "missing");
-                return;
-            }
+        execSeq  = findUnique(kTlsExecuteIpEntrySeqPattern, nullptr, sizeof(kTlsExecuteIpEntrySeqPattern), slide,
+             size);
+        smuWrite = findUnique(kSmuCgsWritePattern, nullptr, sizeof(kSmuCgsWritePattern), slide, size);
+        if (execSeq == 0 || smuWrite == 0) {
+            BCLOG("BC250HWL", "level 9: TlsExecuteIpEntrySeq %s, smu_cgs_write_register %s; not hooked",
+                execSeq ? "found" : "missing", smuWrite ? "found" : "missing");
+            return;
         }
         // From level 10 the stop moves into the per-SWIP event dispatcher.
         mach_vm_address_t swipEvent = 0, providerLookup = 0;
-        if (surveyLevel >= 10) {
-            swipEvent = findUnique(kIpiSwipEventPattern, nullptr, sizeof(kIpiSwipEventPattern), slide, size);
-            if (swipEvent == 0) {
-                BCLOG("BC250HWL", "level 10: SWIP event dispatcher missing; not hooked");
-                return;
-            }
-            // From level 12 every sw_init runs by default, and bc250hw selects how many SWIPs run hw_init.
-            if (surveyLevel >= 12) { swipAllowed = arrsize(kSwipBootOrder); }
-            PE_parse_boot_argn("bc250swip", &swipAllowed, sizeof(swipAllowed));
-            if (surveyLevel >= 13) { hwAllowed = hwLimit(); }
-            if (surveyLevel >= 12) { PE_parse_boot_argn("bc250hw", &hwAllowed, sizeof(hwAllowed)); }
-            // Levels 13-14 go no further than GVM, 15-17 no further than PSP, 18 no further than GC's dry run.
-            if (surveyLevel >= 13 && hwAllowed > hwLimit()) { hwAllowed = hwLimit(); }
-            // Logging only: a missing lookup does not stop level 10.
-            providerLookup = findUnique(kSwipProviderLookupPattern, kSwipProviderLookupMask,
-                sizeof(kSwipProviderLookupPattern), slide, size);
-            if (providerLookup != 0) {
-                swipProviderFn  = ripTarget(providerLookup + kProviderFnLoad);
-                swipProviderCtx = ripTarget(providerLookup + kProviderCtxLoad);
-            }
-            else {
-                BCLOG("BC250HWL", "level 10: SWIP provider lookup not found; not logged");
-            }
+        swipEvent = findUnique(kIpiSwipEventPattern, nullptr, sizeof(kIpiSwipEventPattern), slide, size);
+        if (swipEvent == 0) {
+            BCLOG("BC250HWL", "level 10: SWIP event dispatcher missing; not hooked");
+            return;
+        }
+        // From level 12 every sw_init runs by default, and bc250hw selects how many SWIPs run hw_init.
+        swipAllowed = arrsize(kSwipBootOrder);
+        hwAllowed = hwLimit();
+        // Logging only: a missing lookup does not stop level 10.
+        providerLookup = findUnique(kSwipProviderLookupPattern, kSwipProviderLookupMask,
+            sizeof(kSwipProviderLookupPattern), slide, size);
+        if (providerLookup != 0) {
+            swipProviderFn  = ripTarget(providerLookup + kProviderFnLoad);
+            swipProviderCtx = ripTarget(providerLookup + kProviderCtxLoad);
+        }
+        else {
+            BCLOG("BC250HWL", "level 10: SWIP provider lookup not found; not logged");
         }
         KernelPatcher::RouteRequest requests[] = {
             {nullptr, wrapIpiValidateTopology, orgIpiValidateTopology},
@@ -4057,136 +4024,128 @@ namespace
         requests[3].from = execSeq;
         requests[4].from = smuWrite;
         requests[5].from = swipEvent;
-        const size_t count = surveyLevel >= 10 ? 6 : surveyLevel >= 9 ? 5 : 3;
+        const size_t count = 6;
         if (patcher.routeMultiple(id, requests, count)) {
-            if (surveyLevel >= 9) {
-                BCLOG("BC250HWL", "level 9: TlsExecuteIpEntrySeq +0x%llX, smu_cgs_write_register +0x%llX hooked",
-                    execSeq - slide, smuWrite - slide);
+            BCLOG("BC250HWL", "level 9: TlsExecuteIpEntrySeq +0x%llX, smu_cgs_write_register +0x%llX hooked",
+                execSeq - slide, smuWrite - slide);
+            BCLOG("BC250HWL", "level 10: SWIP event dispatcher +0x%llX hooked, first %u SWIP(s) of the boot order "
+                              "may run sw_init",
+                swipEvent - slide, swipAllowed);
+            hookGvmStages(patcher, id, slide, size);
+            hookPspClassify(patcher, id, slide, size);
+            BCLOG("BC250HWL", "level 12: hw_init for the first %u SWIP(s) of the boot order, DMCU stubbed",
+                hwAllowed);
+            setCailSettings();
+            const auto reader =
+                findUnique(kCailReadSettingPattern, nullptr, sizeof(kCailReadSettingPattern), slide, size);
+            if (reader != 0) {
+                KernelPatcher::RouteRequest request {nullptr, wrapCailReadSetting, orgCailReadSetting};
+                request.from = reader;
+                if (!patcher.routeMultiple(id, &request, 1)) {
+                    BCLOG("BC250HWL", "level 12: CAIL setting reader failed to route");
+                    patcher.clearError();
+                }
             }
-            if (surveyLevel >= 10) {
-                BCLOG("BC250HWL", "level 10: SWIP event dispatcher +0x%llX hooked, first %u SWIP(s) of the boot order "
-                                  "may run sw_init",
-                    swipEvent - slide, swipAllowed);
+            else {
+                BCLOG("BC250HWL", "level 12: CAIL setting reader not found; reads not logged");
             }
-            if (surveyLevel >= 10) {
-                hookGvmStages(patcher, id, slide, size);
-                hookPspClassify(patcher, id, slide, size);
+            const auto extTag =
+                findUnique(kPcieSetExtTagPattern, nullptr, sizeof(kPcieSetExtTagPattern), slide, size);
+            KernelPatcher::RouteRequest extTagRequest {nullptr, wrapPcieSetExtTag, orgPcieSetExtTag};
+            extTagRequest.from = extTag;
+            if (extTag == 0 || !patcher.routeMultiple(id, &extTagRequest, 1)) {
+                // Without this guard BGM's hw_init could write PCI config 0x60 of unknown devices: keep hw_init
+                // refused for every SWIP.
+                BCLOG("BC250HWL", "level 12: PCIE extended-tag guard not installed; hw_init stays refused");
+                patcher.clearError();
+                hwAllowed = 0;
             }
-            if (surveyLevel >= 12) {
-                BCLOG("BC250HWL", "level 12: hw_init for the first %u SWIP(s) of the boot order, DMCU stubbed",
-                    hwAllowed);
-                setCailSettings();
-                const auto reader =
-                    findUnique(kCailReadSettingPattern, nullptr, sizeof(kCailReadSettingPattern), slide, size);
-                if (reader != 0) {
-                    KernelPatcher::RouteRequest request {nullptr, wrapCailReadSetting, orgCailReadSetting};
-                    request.from = reader;
-                    if (!patcher.routeMultiple(id, &request, 1)) {
-                        BCLOG("BC250HWL", "level 12: CAIL setting reader failed to route");
-                        patcher.clearError();
+            {
+                if (hookGvmDryRun(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "level 13: GVM dry run hooked: its register writes and GPU memory copies are "
+                                      "logged, not made");
+                    enableGvmLive();
+                }
+                else if (hwAllowed >= kGvmHwPosition) {
+                    BCLOG("BC250HWL", "level 13: GVM dry run not installed; GVM hw_init refused");
+                    hwAllowed = kGvmHwPosition - 1;
+                }
+            }
+            {
+                if (hookPspDryRun(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "level 15: PSP dry run hooked: its register writes, ring create and commands "
+                                      "are logged, not made");
+                    {
+                        pspLive = gvmLive;
+                        fwLive  = pspLive;
+                        if (fwLive) {
+                            const PenguinWizardry::MaskedLookupPatch tmrAlign {&kextRadeonX6000HWLibs,
+                                kPspTmrAlignOriginal, kPspTmrAlignPatched, sizeof(kPspTmrAlignOriginal), 1};
+                            const bool aligned = tmrAlign.apply(patcher, slide, size);
+                            if (!aligned) { patcher.clearError(); }
+                            BCLOG("BC250HWL", "level 17: TMR alignment %s", aligned ? "4 MB" : "patch failed, 1 MB");
+                        }
+                        BCLOG("BC250HWL", "level 16: PSP ring and TMR %s", pspLive ? "made (ASD, TAs, TOC and "
+                            "firmware loads still logged, not sent)" : "stay a dry run (GVM is not live)");
+                        if (fwLive) {
+                            BCLOG("BC250HWL", "level 17: PSP loads the BC-250's cyan_skillfish2 microcode (ME, PFP, "
+                                              "CE, MEC, MEC2, RLC_G, SDMA0/1)");
+                        }
                     }
+                }
+                else if (hwAllowed >= kPspHwPosition) {
+                    BCLOG("BC250HWL", "level 15: PSP dry run not installed; PSP hw_init refused");
+                    hwAllowed = kPspHwPosition - 1;
+                }
+            }
+            {
+                hookGcLog(patcher, id, slide, size);
+                if (hookGcDryRun(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "level 18: GC dry run hooked: its register writes are logged, not made");
+                    {
+                        gcLive = fwLive;
+                        BCLOG("BC250HWL", "level 19: GC's writes %s", gcLive ? "are made (SPM sample delays dropped)"
+                                                                       : "stay a dry run (firmware not loaded live)");
+                    }
+                }
+                else if (hwAllowed >= kGcHwPosition) {
+                    BCLOG("BC250HWL", "level 18: GC dry run not installed; GC hw_init refused");
+                    hwAllowed = kGcHwPosition - 1;
+                }
+            }
+            {
+                const auto at = findUnique(kIpiQueryPattern, nullptr, sizeof(kIpiQueryPattern), slide, size);
+                KernelPatcher::RouteRequest request {nullptr, wrapIpiQuery, orgIpiQuery};
+                request.from = at;
+                const auto vcn = findFunction(patcher, id, "_IpiGetVcnContext", kIpiVcnContextPattern,
+                    sizeof(kIpiVcnContextPattern), slide, size);
+                KernelPatcher::RouteRequest vcnRequest {nullptr, wrapIpiVcnContext};
+                vcnRequest.from = vcn;
+                const bool vcnOk = vcn != 0 && patcher.routeMultipleShort(id, &vcnRequest, 1);
+                if (!vcnOk) { patcher.clearError(); }
+                if (vcnOk && at != 0 && patcher.routeMultiple(id, &request, 1)) {
+                    BCLOG("BC250HWL", "level 22: IPI query router and VCN context hooked (stubbed VCN absent)");
                 }
                 else {
-                    BCLOG("BC250HWL", "level 12: CAIL setting reader not found; reads not logged");
-                }
-                const auto extTag =
-                    findUnique(kPcieSetExtTagPattern, nullptr, sizeof(kPcieSetExtTagPattern), slide, size);
-                KernelPatcher::RouteRequest extTagRequest {nullptr, wrapPcieSetExtTag, orgPcieSetExtTag};
-                extTagRequest.from = extTag;
-                if (extTag == 0 || !patcher.routeMultiple(id, &extTagRequest, 1)) {
-                    // Without this guard BGM's hw_init could write PCI config 0x60 of unknown devices: keep hw_init
-                    // refused for every SWIP.
-                    BCLOG("BC250HWL", "level 12: PCIE extended-tag guard not installed; hw_init stays refused");
+                    // Without it TTL's post-init calls into the empty VCN context: keep TTL short of completing.
                     patcher.clearError();
-                    hwAllowed = 0;
+                    hwAllowed = kSdmaHwPosition;
+                    BCLOG("BC250HWL", "level 22: IPI query router or VCN context not hooked; hw_init stops after "
+                                      "SDMA");
                 }
-                if (surveyLevel >= 13) {
-                    if (hookGvmDryRun(patcher, id, slide, size)) {
-                        BCLOG("BC250HWL", "level 13: GVM dry run hooked: its register writes and GPU memory copies are "
-                                          "logged, not made");
-                        if (surveyLevel >= 14) { enableGvmLive(); }
-                    }
-                    else if (hwAllowed >= kGvmHwPosition) {
-                        BCLOG("BC250HWL", "level 13: GVM dry run not installed; GVM hw_init refused");
-                        hwAllowed = kGvmHwPosition - 1;
-                    }
-                }
-                if (surveyLevel >= 15) {
-                    if (hookPspDryRun(patcher, id, slide, size)) {
-                        BCLOG("BC250HWL", "level 15: PSP dry run hooked: its register writes, ring create and commands "
-                                          "are logged, not made");
-                        if (surveyLevel >= 16) {
-                            pspLive = gvmLive;
-                            fwLive  = surveyLevel >= 17 && pspLive;
-                            if (fwLive) {
-                                const PenguinWizardry::MaskedLookupPatch tmrAlign {&kextRadeonX6000HWLibs,
-                                    kPspTmrAlignOriginal, kPspTmrAlignPatched, sizeof(kPspTmrAlignOriginal), 1};
-                                const bool aligned = tmrAlign.apply(patcher, slide, size);
-                                if (!aligned) { patcher.clearError(); }
-                                BCLOG("BC250HWL", "level 17: TMR alignment %s", aligned ? "4 MB" : "patch failed, 1 MB");
-                            }
-                            BCLOG("BC250HWL", "level 16: PSP ring and TMR %s", pspLive ? "made (ASD, TAs, TOC and "
-                                "firmware loads still logged, not sent)" : "stay a dry run (GVM is not live)");
-                            if (fwLive) {
-                                BCLOG("BC250HWL", "level 17: PSP loads the BC-250's cyan_skillfish2 microcode (ME, PFP, "
-                                                  "CE, MEC, MEC2, RLC_G, SDMA0/1)");
-                            }
-                        }
-                    }
-                    else if (hwAllowed >= kPspHwPosition) {
-                        BCLOG("BC250HWL", "level 15: PSP dry run not installed; PSP hw_init refused");
-                        hwAllowed = kPspHwPosition - 1;
+            }
+            {
+                if (hookSdmaDryRun(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "level 20: SDMA dry run hooked: its register writes are logged, not made");
+                    {
+                        sdmaLive = gcLive;
+                        BCLOG("BC250HWL", "level 21: SDMA's writes %s", sdmaLive ? "are made (Linux's engine start "
+                            "values)" : "stay a dry run (GC is not live)");
                     }
                 }
-                if (surveyLevel >= 18) {
-                    hookGcLog(patcher, id, slide, size);
-                    if (hookGcDryRun(patcher, id, slide, size)) {
-                        BCLOG("BC250HWL", "level 18: GC dry run hooked: its register writes are logged, not made");
-                        if (surveyLevel >= 19) {
-                            gcLive = fwLive;
-                            BCLOG("BC250HWL", "level 19: GC's writes %s", gcLive ? "are made (SPM sample delays dropped)"
-                                                                           : "stay a dry run (firmware not loaded live)");
-                        }
-                    }
-                    else if (hwAllowed >= kGcHwPosition) {
-                        BCLOG("BC250HWL", "level 18: GC dry run not installed; GC hw_init refused");
-                        hwAllowed = kGcHwPosition - 1;
-                    }
-                }
-                if (surveyLevel >= 22) {
-                    const auto at = findUnique(kIpiQueryPattern, nullptr, sizeof(kIpiQueryPattern), slide, size);
-                    KernelPatcher::RouteRequest request {nullptr, wrapIpiQuery, orgIpiQuery};
-                    request.from = at;
-                    const auto vcn = findFunction(patcher, id, "_IpiGetVcnContext", kIpiVcnContextPattern,
-                        sizeof(kIpiVcnContextPattern), slide, size);
-                    KernelPatcher::RouteRequest vcnRequest {nullptr, wrapIpiVcnContext};
-                    vcnRequest.from = vcn;
-                    const bool vcnOk = vcn != 0 && patcher.routeMultipleShort(id, &vcnRequest, 1);
-                    if (!vcnOk) { patcher.clearError(); }
-                    if (vcnOk && at != 0 && patcher.routeMultiple(id, &request, 1)) {
-                        BCLOG("BC250HWL", "level 22: IPI query router and VCN context hooked (stubbed VCN absent)");
-                    }
-                    else {
-                        // Without it TTL's post-init calls into the empty VCN context: keep TTL short of completing.
-                        patcher.clearError();
-                        hwAllowed = kSdmaHwPosition;
-                        BCLOG("BC250HWL", "level 22: IPI query router or VCN context not hooked; hw_init stops after "
-                                          "SDMA");
-                    }
-                }
-                if (surveyLevel >= 20) {
-                    if (hookSdmaDryRun(patcher, id, slide, size)) {
-                        BCLOG("BC250HWL", "level 20: SDMA dry run hooked: its register writes are logged, not made");
-                        if (surveyLevel >= 21) {
-                            sdmaLive = gcLive;
-                            BCLOG("BC250HWL", "level 21: SDMA's writes %s", sdmaLive ? "are made (Linux's engine start "
-                                "values)" : "stay a dry run (GC is not live)");
-                        }
-                    }
-                    else if (hwAllowed >= kSdmaHwPosition) {
-                        BCLOG("BC250HWL", "level 20: SDMA dry run not installed; SDMA hw_init refused");
-                        hwAllowed = kSdmaHwPosition - 1;
-                    }
+                else if (hwAllowed >= kSdmaHwPosition) {
+                    BCLOG("BC250HWL", "level 20: SDMA dry run not installed; SDMA hw_init refused");
+                    hwAllowed = kSdmaHwPosition - 1;
                 }
             }
             if (providerLookup != 0) {
@@ -4292,10 +4251,10 @@ void BC250HWL::sdma1TrapPoll()
         PE_parse_boot_argn("bc250sdma1trap", &trap, sizeof(trap));
         mirror = trap != 0;
     }
-    // Only once the AMD kexts load (surveyLevel is set then): before that SDMA may be powered down, and reading the
-    // registers of a powered-down block can hang the bus.
+    // Only once the AMD kexts load: before that SDMA may be powered down, and reading the registers of a powered-down
+    // block can hang the bus.
     auto& nred = NRed::singleton();
-    if (!mirror || surveyLevel < 28 || nred.getMMIOLength() == 0) { return; }
+    if (!mirror || !amdKextsLoaded || nred.getMMIOLength() == 0) { return; }
     constexpr UInt32 kSdma0Cntl = 0x127C, kSdma1Cntl = 0x187C;
     const UInt32     s0 = nred.readReg32(kSdma0Cntl), s1 = nred.readReg32(kSdma1Cntl);
     if ((s0 & 1) != 0 && (s1 & 1) == 0 && s1 != 0xFFFFFFFF) { nred.writeReg32(kSdma1Cntl, s1 | 1); }
@@ -4420,28 +4379,24 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         return;
     }
 
-    surveyLevel = BC250::singleton().getHWLLevel();
+    amdKextsLoaded = true;
     kextRanges[static_cast<UInt8>(kext)].start = slide;
     kextRanges[static_cast<UInt8>(kext)].end   = slide + size;
     static const char* const names[] = {"AMDRadeonX6000Framebuffer", "AMDRadeonX6000HWServices",
         "AMDRadeonX6000HWLibs", "AMDRadeonX6000"};
-    BCLOG("BC250HWL", "%s loaded (survey level %u)", names[static_cast<UInt8>(kext)], surveyLevel);
-    // The accelerator is only injected from level 4 (DriverInjector); leave it alone below that.
-    if (kext == Kext::Accel && surveyLevel < 4) { return; }
+    BCLOG("BC250HWL", "%s loaded", names[static_cast<UInt8>(kext)]);
 
     if (kext == Kext::HWLibs) {
         hwlibsStart = slide;
         hwlibsEnd   = slide + size;
-        if (surveyLevel >= 2) { patchHWLibsTables(slide, size); }
-        if (surveyLevel >= 6) {
-            patchTtlAsicTable(slide, size);
-            patchDiscoveryVersion(slide, size);
-        }
-        if (surveyLevel >= 8) { hookTlsSwInit(patcher, id, slide, size); }
-        if (surveyLevel >= 7) { hookBgmCreate(patcher, id, slide, size); }
+        patchHWLibsTables(slide, size);
+        patchTtlAsicTable(slide, size);
+        patchDiscoveryVersion(slide, size);
+        hookTlsSwInit(patcher, id, slide, size);
+        hookBgmCreate(patcher, id, slide, size);
     }
     if (kext == Kext::Accel) { guardUnmapDoorbellMemory(patcher, id, slide, size); }
-    if (kext == Kext::Accel && surveyLevel >= 27) {
+    if (kext == Kext::Accel) {
         accelLive = true;
         // Level 27: the KIQ's first packet, SET_RESOURCES, with Linux's first dword (gfx_v10_0_kiq_set_resources:
         // VMID_MASK 0, unmap latency 0) instead of Apple's (all 16 VMIDs to the firmware scheduler, latency 0x28);
@@ -4456,13 +4411,13 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             BCLOG("BC250HWL", "level 27: KIQ SET_RESOURCES %s", ok ? "as Linux (VMID mask 0)" : "patch failed, Apple's");
         }
     }
-    if (kext == Kext::Accel && surveyLevel >= 23) { hookAccelRegisters(patcher, id, slide, size); }
-    if (kext == Kext::Accel && surveyLevel >= 28) {
+    if (kext == Kext::Accel) { hookAccelRegisters(patcher, id, slide, size); }
+    if (kext == Kext::Accel) {
         hookVmEntries(patcher, id, slide, size);
         hookHwInfo(patcher, id, slide, size);
         hookHubInvalidateRequests(patcher, id, slide, size);
     }
-    if (kext == Kext::FB && surveyLevel >= 28) {
+    if (kext == Kext::FB) {
         KernelPatcher::RouteRequest start {"__ZN34AMDRadeonX6000_AmdInterruptManager15startInterruptsEP10IOWorkLoop",
             wrapStartInterrupts, orgStartInterrupts};
         if (!patcher.routeMultiple(id, &start, 1, slide, size) || orgStartInterrupts == 0) {
@@ -4470,7 +4425,7 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             patcher.clearError();
         }
     }
-    if (kext == Kext::FB && surveyLevel >= 25) {
+    if (kext == Kext::FB) {
         KernelPatcher::RouteRequest request {
             "__ZN34AMDRadeonX6000_AmdRadeonController28callPlatformFunctionFromDrvrEjPvS0_S0_",
             wrapControllerDrvrFunction, orgControllerDrvrFunction};
@@ -4480,7 +4435,7 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             accelStopUnguarded = true;
         }
     }
-    if (kext == Kext::Accel && surveyLevel >= 28) {
+    if (kext == Kext::Accel) {
         UInt32 stats = 1;
         PE_parse_boot_argn("bc250stats", &stats, sizeof(stats));
         if (stats != 0) {
@@ -4495,7 +4450,7 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             }
         }
     }
-    if (kext == Kext::Accel && surveyLevel >= 25) {
+    if (kext == Kext::Accel) {
         KernelPatcher::RouteRequest stopRequest {"__ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService",
             wrapAccelStop, orgAccelStop};
         if (!patcher.routeMultiple(id, &stopRequest, 1, slide, size)) {

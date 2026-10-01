@@ -52,8 +52,6 @@ public:
     bool        isFramebufferMode() const { return this->mode == Mode::Framebuffer; }
     // `-BC250HWL` (with -BC250FB): load HWServices/HWLibs and log them, without starting any engine.
     bool        isHWLSurvey() const { return this->hwlSurvey; }
-    // Survey level (boot-arg bc250hwl, default 1); see BC250HWL.hpp.
-    UInt32      getHWLLevel() const { return this->hwlLevel; }
 
     // Called by NRed once the device has been identified as Cyan Skillfish.
     void processPatcher();
@@ -61,7 +59,6 @@ public:
 private:
     Mode mode{Mode::Probe};
     bool   hwlSurvey{false};
-    UInt32 hwlLevel{1};
     Info   info{};
 
     void probe();
