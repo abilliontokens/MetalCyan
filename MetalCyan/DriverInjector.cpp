@@ -72,7 +72,7 @@ static void addBC250AcceleratorPersonality(OSArray* const array)
 bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, const bool doNubMatching)
 {
     if (NRed::singleton().getAttributes().isCyanSkillfish() && BC250::singleton().isHWLSurvey() &&
-        BC250::singleton().getHWLLevel() >= 4 && !singleton().bc250AccelInjected)
+        !singleton().bc250AccelInjected)
     {
         for (UInt32 i = 0; i < array->getCount(); i += 1) {
             auto* dict = OSDynamicCast(OSDictionary, array->getObject(i));
