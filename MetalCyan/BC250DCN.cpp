@@ -37,10 +37,6 @@ namespace
         "int dcn20_validate_apply_pipe_split_flags(struct dc *, struct dc_state *, int, int *, _Bool *)";
     constexpr size_t MAX_PIPES = 6;    // Navi 10's DAL, the size of the split[] arrays it passes around.
 
-    const char kFindSecondaryPipe[] =
-        "struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *, struct resource_context *, "
-        "const struct resource_pool *, const struct pipe_ctx *)";
-
     // DENTIST divider IDs in quarter steps (dcn20_clk_mgr.c ranges 1 and 2; the 7-bit field never reaches 3).
     UInt32 didToDiv4(UInt32 did) { return did < 64 ? did : 64 + (did - 64) * 2; }
     UInt32 div4ToDid(UInt32 div4) { return div4 < 64 ? div4 : 64 + (div4 - 64) / 2; }
@@ -104,19 +100,9 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
     }
 
-    // 3. MPC splits. By default the DAL is kept from splitting at all (one pipe per stream, like the GOP), since
-    // the partner pipe of a split does not come out right on DCN 2.0.1. -BC250PipeRemap instead moves the partner
-    // from pipe 4/5 to 2/3 (experimental).
-    if (checkKernelArgument("-BC250PipeRemap")) {
-        const auto fn = findFunctionByString(slide, size, kFindSecondaryPipe, sizeof(kFindSecondaryPipe));
-        KernelPatcher::RouteRequest request {nullptr, wrapFindSecondaryPipe, this->orgFindSecondaryPipe};
-        request.from = fn;
-        if (fn == 0 || !patcher.routeMultiple(id, &request, 1)) {
-            BCLOG("BC250DCN", "dcn20_find_secondary_pipe not routed");
-            patcher.clearError();
-        }
-    }
-    else {
+    // 3. MPC splits. The DAL is kept from splitting at all (one pipe per stream, like the GOP), since the partner
+    // pipe of a split does not come out right on DCN 2.0.1.
+    {
         const auto fn = findFunctionByString(slide, size, kApplyPipeSplitFlags, sizeof(kApplyPipeSplitFlags));
         KernelPatcher::RouteRequest request {nullptr, wrapApplyPipeSplitFlags, this->orgApplyPipeSplitFlags};
         request.from = fn;
@@ -131,22 +117,12 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
     const auto fbInt   = pllReq & 0x1FF;
     const auto fbFrac  = pllReq >> 16;
     this->vcoKHz       = fbInt * 100000 + static_cast<UInt32>((static_cast<UInt64>(fbFrac) * 100000) >> 16);
-    UInt32 overrideKHz = 0;
-    if (PE_parse_boot_argn("bc250vco", &overrideKHz, sizeof(overrideKHz)) && overrideKHz != 0) {
-        this->vcoKHz = overrideKHz;
-    }
     if (this->vcoKHz < 1000000 || this->vcoKHz > 6000000) {
         BCLOG("BC250DCN", "Implausible DENTIST VCO %u kHz (CLK4_CLK_PLL_REQ 0x%X); using 2670000", this->vcoKHz,
             pllReq);
         this->vcoKHz = 2670000;
     }
-    PE_parse_boot_argn("bc250applevco", &this->appleVcoKHz, sizeof(this->appleVcoKHz));
-    if (checkKernelArgument("-BC250NoClockFix")) {
-        BCLOG("BC250DCN", "DENTIST watcher disabled by -BC250NoClockFix");
-    }
-    else {
-        this->startClockWatcher();
-    }
+    this->startClockWatcher();
 }
 
 // -- 1. Scanout addresses (MC -> UMA) --
@@ -233,27 +209,6 @@ int BC250DCN::wrapApplyPipeSplitFlags(void* dc, void* context, int vlevel, int* 
         }
     }
     return ret;
-}
-
-// pipe_ctx[] is the first member of resource_context, so an index follows from the pointer difference. On the
-// first split the partner is pipe 5 (the DAL searches downwards from pipe_count - 1), which gives the stride.
-void* BC250DCN::wrapFindSecondaryPipe(void* dc, void* resCtx, const void* pool, const void* primary)
-{
-    auto&      s   = singleton();
-    auto*      ret = FunctionCast(wrapFindSecondaryPipe, s.orgFindSecondaryPipe)(dc, resCtx, pool, primary);
-    if (ret == nullptr || resCtx == nullptr || ret <= resCtx) { return ret; }
-    const auto delta = static_cast<size_t>(static_cast<UInt8*>(ret) - static_cast<UInt8*>(resCtx));
-    if (s.pipeCtxSize == 0) {
-        if (primary != resCtx || delta % 5 != 0 || delta / 5 < 0x200 || delta / 5 > 0x8000) {
-            BCLOG("BC250DCN", "find_secondary_pipe: cannot derive pipe_ctx size (delta 0x%zX)", delta);
-            return ret;
-        }
-        s.pipeCtxSize = delta / 5;
-    }
-    if (delta % s.pipeCtxSize != 0) { return ret; }
-    const auto index = delta / s.pipeCtxSize;
-    if (index < 4 || index > 5) { return ret; }
-    return static_cast<UInt8*>(resCtx) + (index - 2) * s.pipeCtxSize;
 }
 
 // -- 2. DENTIST clocks --

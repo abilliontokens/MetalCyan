@@ -22,6 +22,6 @@ public:
     void sdma1TrapPoll();
 
     // IOGraphicsAccelerator2's orphaned-VRAM handling (from the SMU thread, every second): VRAM reuse off once the
-    // accelerator exists (bc250vramreuse=1 keeps it).
+    // accelerator exists.
     void accelPoolTick();
 };

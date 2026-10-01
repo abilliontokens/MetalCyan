@@ -45,12 +45,6 @@ static const UInt8 kPopulateVramInfoPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xF
                                                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0xFF, 0xF0, 0xF0,
                                                      0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-static const UInt8 kDpReceiverPowerCtrlPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
-                                                    0x48, 0x83, 0xEC, 0x10, 0x89, 0xF3, 0xB0, 0x02, 0x28, 0xD8};
-static const UInt8 kDpReceiverPowerCtrlPattern1404[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
-                                                        0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x10, 0x41,
-                                                        0x89, 0xF7, 0xB0, 0x02, 0x44, 0x28, 0xF8};
-
 static const UInt8      kCreateVramInfoCallPattern[]          = {0x48, 0x8B, 0x7B, 0x18, 0x48, 0x8B, 0x43, 0x20, 0x0F,
                                                                  0xB7, 0x70, 0x3C, 0xE8, 0x00, 0x00, 0x00, 0x00};
 static const UInt8      kCreateVramInfoCallPatternMask[]      = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -167,12 +161,6 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     return ret;
-}
-
-void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
-{
-    FunctionCast(wrapDpReceiverPowerCtrl, singleton().orgDpReceiverPowerCtrl)(link, powerOn);
-    IOSleep(250);
 }
 
 void* X6000FB::wrapCreateObjectInfo(void* const helper, const UInt32 tableOffset)
@@ -449,12 +437,9 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
         }
     }
     PANIC_COND(naviEntry == nullptr, "X6000FB", "BC-250: No Navi entry in CAIL_ASIC_CAPS_TABLE");
+    // Navi 10's caps as they are: Linux scans out from the carve-out (`sg_display=0`) on this chip, the dGPU-style
+    // behaviour they describe.
     memcpy(bc250DdiCaps, naviEntry->ddiCaps, sizeof(bc250DdiCaps));
-    // Experiment lever: tell the DAL the device is an APU. Off by default: Linux scans out from the carve-out
-    // (`sg_display=0`) on this chip, which is the dGPU-style behaviour Navi 10's caps already describe.
-    if (checkKernelArgument("-BC250APUCap")) {
-        bc250DdiCaps[DDI_CAP_APU / 32] |= getBit<UInt32>(DDI_CAP_APU % 32);
-    }
 
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "X6000FB",
                "Failed to enable kernel writing");
@@ -470,20 +455,6 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
           .skeleton    = skeleton,
     };
     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-
-    if (checkKernelArgument("-NRedDPDelay")) {
-        if (currentKernelVersion() >= MACOS_14_4) {
-            PenguinWizardry::PatternRouteRequest request{"_dp_receiver_power_ctrl", wrapDpReceiverPowerCtrl,
-                                                         this->orgDpReceiverPowerCtrl, kDpReceiverPowerCtrlPattern1404};
-            PANIC_COND(!request.route(patcher, id, slide, size), "X6000FB",
-                       "Failed to route dp_receiver_power_ctrl (14.4+)");
-        }
-        else {
-            PenguinWizardry::PatternRouteRequest request{"_dp_receiver_power_ctrl", wrapDpReceiverPowerCtrl,
-                                                         this->orgDpReceiverPowerCtrl, kDpReceiverPowerCtrlPattern};
-            PANIC_COND(!request.route(patcher, id, slide, size), "X6000FB", "Failed to route dp_receiver_power_ctrl");
-        }
-    }
 
     // Same macOS 13+ reverts as the iGPU path: there is no accelerator to wait for in framebuffer mode.
     if (currentKernelVersion() >= MACOS_13) {
@@ -585,6 +556,6 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
                "X6000FB", "Failed to apply createLinks patch");
 
     // DCN 2.0.1 quirks: UMA scanout addresses, DENTIST VCO, 4 pipes. Soft-fails per quirk.
-    if (!checkKernelArgument("-BC250NoDCNQuirks")) { BC250DCN::singleton().processKext(patcher, id, slide, size); }
+    BC250DCN::singleton().processKext(patcher, id, slide, size);
 
 }

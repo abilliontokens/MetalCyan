@@ -98,22 +98,10 @@ namespace
     // MetalDevice"). Zero clocks get the BC-250's: 100 MHz reference (GFX10's xclk, the GPU timestamp clock), 2000 MHz
     // GFX (cyan_skillfish's maximum), 1750 MHz GDDR6 (14 Gbps).
     //
-    // Filling them in the hardware object (bc250clk=2) hung the machine within 0.2 s, during the accelerator's own
-    // start, before WindowServer (with the fill off the same build stays up): something in the kernel acts on
-    // non-zero clocks. By default (bc250clk=1) the kernel keeps Apple's zeros and only getHardwareInfo's copy for the
-    // Metal driver gets the BC-250's clocks (wrapAccelHwInfo). bc250clk=0: neither.
+    // Filling them in the hardware object hung the machine within 0.2 s, during the accelerator's own start, before
+    // WindowServer: something in the kernel acts on non-zero clocks. The kernel keeps Apple's zeros and only
+    // getHardwareInfo's copy for the Metal driver gets the BC-250's clocks (wrapAccelHwInfo).
     constexpr UInt64 kBc250RefClk = 10000, kBc250SysClk = 200000, kBc250MemClk = 175000;
-    SInt32           hwInfoClockMode = -1;
-
-    UInt32 hwInfoClkMode()
-    {
-        if (hwInfoClockMode < 0) {
-            UInt32 clk = 1;
-            PE_parse_boot_argn("bc250clk", &clk, sizeof(clk));
-            hwInfoClockMode = static_cast<SInt32>(clk);
-        }
-        return static_cast<UInt32>(hwInfoClockMode);
-    }
 
     // The registrations (framebuffer registerForInterruptType): the handle it returns is {event, callback}; the
     // callback (AmdInterruptCallback) is +0x18 function, +0x20 owner, +0x30 enabled, +0x58 reference.
@@ -136,7 +124,7 @@ namespace
     // dispatches its SDMA1 sources (IRQ_SOURCEX_SDMA1_TRAP_GFX/PAGE, 0xFF0003E8/9): SDMA1's fences complete unseen until
     // IOAccel's 6 s progress check. Each time IRQMgr dispatches any event (at least the display's V_UPDATE, ~60 Hz),
     // SDMA1's events are notified too, in the same context: HWChannel::timeStampInterruptCallback reads the fence itself
-    // and returns at once when nothing new completed (bc250sdma1kick=0 disables).
+    // and returns at once when nothing new completed.
     // SDMA1's events, notified with every other IRQMgr dispatch (below) and from a timer (bug 4: while the display is
     // idle or being reprogrammed there is no V_UPDATE, so SDMA1's finished work waited for IOAccel's 5 s progress
     // check: slow lock screen, mode sets, boot). The timer checks the SDMA1 channels (the callbacks' owners) for
@@ -145,19 +133,8 @@ namespace
     // 12 s stall at boot); IRQMgr itself dispatches from several threads.
     mach_vm_address_t   sdma1NotifyOrg = 0;
     volatile UInt32     sdma1KickBusy  = 0;
-    SInt32              sdma1KickOn    = -1;
     IOTimerEventSource* sdma1Timer     = nullptr;
     IOWorkLoop*         sdma1WorkLoop  = nullptr;
-
-    bool sdma1KickEnabled()
-    {
-        if (sdma1KickOn < 0) {
-            UInt32 kick = 1;
-            PE_parse_boot_argn("bc250sdma1kick", &kick, sizeof(kick));
-            sdma1KickOn = kick != 0 ? 1 : 0;
-        }
-        return sdma1KickOn == 1;
-    }
 
     bool sdma1Pending()
     {
@@ -175,7 +152,7 @@ namespace
     void sdma1Kick(mach_vm_address_t org, void* current, void* info)
     {
         if (org != 0) { sdma1NotifyOrg = org; }
-        if (!sdma1KickEnabled() || sdma1NotifyOrg == 0 || !OSCompareAndSwap(0, 1, &sdma1KickBusy)) { return; }
+        if (sdma1NotifyOrg == 0 || !OSCompareAndSwap(0, 1, &sdma1KickBusy)) { return; }
         void* done[2] = {nullptr, nullptr};
         for (UInt32 r = 0; r < irqRegCount; r++) {
             if (irqRegs[r].type != 0xFF0003E8 && irqRegs[r].type != 0xFF0003E9) { continue; }
@@ -204,9 +181,7 @@ namespace
     UInt64 wrapStartInterrupts(void* manager, IOWorkLoop* workLoop)
     {
         const UInt64 ret = FunctionCast(wrapStartInterrupts, orgStartInterrupts)(manager, workLoop);
-        UInt32       timer = 1;
-        PE_parse_boot_argn("bc250sdma1timer", &timer, sizeof(timer));
-        if (timer != 0 && sdma1KickEnabled() && workLoop != nullptr && sdma1Timer == nullptr) {
+        if (workLoop != nullptr && sdma1Timer == nullptr) {
             sdma1WorkLoop = IOWorkLoop::workLoop();
             sdma1Timer    = IOTimerEventSource::timerEventSource(static_cast<OSObject*>(manager), sdma1TimerFired);
             if (sdma1WorkLoop != nullptr && sdma1Timer != nullptr &&
@@ -249,13 +224,11 @@ namespace
     // VCN (video decode/encode) is a stub on the BC-250, but Apple's Navi 10 accelerator personality advertises it
     // (IOGVACodec AMDVCN2, IOGVAHEVCDecode/Encode + capabilities, H.264 encode, IOVARendererID, IODVDBundleName):
     // VideoToolbox then picks the AMD decoder, AppleGVA fails to create it (AVD_api.Create err=5) and Safari plays no
-    // video. Without them macOS decodes in software. bc250vcnprops=1 keeps them.
+    // video. Without them macOS decodes in software.
     void removeVideoProperties(void* accelerator)
     {
-        UInt32 keep = 0;
-        PE_parse_boot_argn("bc250vcnprops", &keep, sizeof(keep));
         auto* service = OSDynamicCast(IOService, static_cast<OSObject*>(accelerator));
-        if (keep != 0 || service == nullptr) { return; }
+        if (service == nullptr) { return; }
         OSDictionary* props = service->dictionaryWithProperties();
         if (props == nullptr) { return; }
         OSArray* names = OSArray::withCapacity(16);
@@ -412,42 +385,19 @@ namespace
     // the reset 0x3FFFFFFC and 0x20000: CLIENT_ID/OTHER_CLIENT_ID_NO_RETRY_FAULT_INTERRUPT (bits 13-29) cleared makes
     // every client's faults retry faults, retried silently in the UTCL2. Linux (gfxhub/mmhub_v2_0_set_fault_enable_
     // default) writes only the *_ENABLE_DEFAULT bits 2-12 and never CNTL2, so the rest keeps its reset value.
-    // bc250noretry=0 keeps Apple's values.
     constexpr UInt32 kGcFaultCntl = 0x1260 + 0x15E8, kMmFaultCntl = 0x1A000 + 0x688, kFaultCntlLinuxBits = 0x1FFC;
-    SInt32           accelFaultCntlLinux = -1;    // -1: boot-arg not read yet.
 
     // GC/MMVM_CONTEXT1-15_CNTL. Apple writes 0x3B (enable, depth 1, block size 7) with none of the
     // *_PROTECTION_FAULT_ENABLE_DEFAULT bits, so a faulting request is refused: the GFX CP halted (ME_CNTL
     // 0x15000000) on Firefox's write to an unmapped VA, and with Apple's Navi 10 GPU reset blocked the display stayed
     // green and the machine froze. Linux (gfxhub/mmhub_v2_0_setup_vmid_config) sets the range, dummy page, PDE0,
     // valid, read, write and execute defaults (bits 10-22, even): the access goes to the default page, the fault is
-    // still reported, and the GPU keeps running. bc250faultdefault=0 keeps Apple's value.
+    // still reported, and the GPU keeps running.
     constexpr UInt32 kGcContext1Cntl = 0x1260 + 0x1621, kMmContext1Cntl = 0x1A000 + 0x6C1, kContextFaultDefaults = 0x555400;
-    SInt32           accelFaultDefaults  = -1;
 
     bool accelIsContextCntl(UInt32 reg)
     {
         return (reg >= kGcContext1Cntl && reg < kGcContext1Cntl + 15) || (reg >= kMmContext1Cntl && reg < kMmContext1Cntl + 15);
-    }
-
-    bool accelContextFaultDefaults()
-    {
-        if (accelFaultDefaults < 0) {
-            UInt32 on = 1;
-            PE_parse_boot_argn("bc250faultdefault", &on, sizeof(on));
-            accelFaultDefaults = on != 0 ? 1 : 0;
-        }
-        return accelFaultDefaults == 1;
-    }
-
-    bool accelFaultCntlAsLinux()
-    {
-        if (accelFaultCntlLinux < 0) {
-            UInt32 noretry = 1;
-            PE_parse_boot_argn("bc250noretry", &noretry, sizeof(noretry));
-            accelFaultCntlLinux = noretry != 0 ? 1 : 0;
-        }
-        return accelFaultCntlLinux == 1;
     }
 
     constexpr UInt32 kInvReqFirst = 0x28A3, kInvAckFirst = 0x28B5;
@@ -457,25 +407,13 @@ namespace
     // behind it). HWLibs' GVM invalidates with 0x02F80000 | VMID mask (FLUSH_TYPE 0, L2 PTEs, PDE0-2, L1 PTEs, bit 25)
     // on ranges too and is acknowledged at once. Requests are sent in GVM's form, followed by Linux's dummy read of the
     // request register (gmc_v10_0_flush_gpu_tlb, GC before 10.3: fast GRBM false ACK) and a wait for the ACK.
-    // bc250inv=0 keeps Apple's requests.
     constexpr UInt32 kInvReqGvm = 0x02F80000, kInvAckTimeoutUs = 100000;
     constexpr UInt32 kMmInvReqFirst = 0x1A6E3, kMmInvAckFirst = 0x1A6F5, kInvReqToAck = 0x12;
-    SInt32           accelInvAsGvm = -1;
     UInt32           accelInvTimeouts = 0;
 
     bool accelIsInvalidateReq(UInt32 reg)
     {
         return (reg >= kInvReqFirst && reg < kInvAckFirst) || (reg >= kMmInvReqFirst && reg < kMmInvAckFirst);
-    }
-
-    bool accelInvalidateAsGvm()
-    {
-        if (accelInvAsGvm < 0) {
-            UInt32 inv = 1;
-            PE_parse_boot_argn("bc250inv", &inv, sizeof(inv));
-            accelInvAsGvm = inv != 0 ? 1 : 0;
-        }
-        return accelInvAsGvm == 1;
     }
 
     void accelInvalidateRequest(void* regs, UInt32 reg, UInt32 value);
@@ -488,7 +426,7 @@ namespace
     void wrapAccelRegWrite(void* regs, UInt32 reg, UInt32 value)
     {
         if (accelIsInvalidate(reg)) {
-            if (accelIsInvalidateReq(reg) && accelInvalidateAsGvm()) {
+            if (accelIsInvalidateReq(reg)) {
                 accelInvalidateRequest(regs, reg, value);
             } else {
                 FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value);
@@ -496,15 +434,14 @@ namespace
             return;
         }
         if (!fbOk) { return; }
-        if ((reg == kGcFaultCntl || reg == kMmFaultCntl || reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1) &&
-            accelFaultCntlAsLinux()) {
+        if (reg == kGcFaultCntl || reg == kMmFaultCntl || reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1) {
             const auto current = FunctionCast(wrapAccelRegRead, orgAccelRegRead)(regs, reg);
             const bool cntl2   = reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1;
             const auto asLinux = cntl2 ? current : (current & ~kFaultCntlLinuxBits) | (value & kFaultCntlLinuxBits);
             FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, asLinux);
             return;
         }
-        if (accelIsContextCntl(reg) && (value & 1) != 0 && accelContextFaultDefaults()) {
+        if (accelIsContextCntl(reg) && (value & 1) != 0) {
             FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value | kContextFaultDefaults);
             return;
         }
@@ -595,7 +532,7 @@ namespace
     // (temperature, m°C), +0x20590 (power, W x 100), +0x20594/+0x20598 (fan RPM/%); with PowerPlay blocked they stay 0.
     // It is replaced (no original called, so no trampoline space) by the same keys filled from the SMU telemetry:
     // GFX clock, Tctl (the GPU shares the die with the CPU) and the GRBM_STATUS busy share; the others as Apple's
-    // fields hold them. bc250stats=0 leaves Apple's function in place.
+    // fields hold them.
     constexpr UInt32 kHwPmCoreClock = 0x20580, kHwPmMemClock = 0x20584, kHwPmActivity = 0x20588, kHwPmTemp = 0x2058C,
                      kHwPmPower = 0x20590, kHwPmFanRpm = 0x20594, kHwPmFanPercent = 0x20598;
 
@@ -1121,7 +1058,6 @@ namespace
     // GCVM/MMVM_CONTEXT0_CNTL and their RETRY_PERMISSION_OR_INVALID_PAGE_FAULT bit.
     constexpr UInt32 kGcContext0Cntl = kGcBase + 0x1620, kMmContext0Cntl = kMmhubBase + 0x6C0, kContextRetry = 1U << 7;
 
-    bool   gvmNoRetry   = false;    // Context 0 without fault retry, as Linux.
     UInt64 gvmFbOffset  = 0, gvmFbSize = 0, gvmFbBase = 0;    // gvmFbBase: the FB's MC address.
 
     // High halves awaiting their carry, one per pair: Apple interleaves the hubs (GC low, MMHUB low, GC high, MMHUB
@@ -1194,7 +1130,7 @@ namespace
     {
         // Apple's GVM enables retry on context 0 (0x01555481); Linux's gfxhub/mmhub_v2_0_enable_system_domain clears
         // it, so a bad VMID0 translation faults instead of retrying forever in the UTCL2.
-        if (gvmNoRetry && (reg == kGcContext0Cntl || reg == kMmContext0Cntl) && (value & kContextRetry) != 0) {
+        if ((reg == kGcContext0Cntl || reg == kMmContext0Cntl) && (value & kContextRetry) != 0) {
             return FunctionCast(wrapGvmWrite, orgGvmWrite)(gvm, reg, value & ~kContextRetry, ip);
         }
         return FunctionCast(wrapGvmWrite, orgGvmWrite)(gvm, reg, gvmAdjustAddress(reg, value), ip);
@@ -1234,9 +1170,6 @@ namespace
             return false;
         }
         fbOk = true;
-        UInt32 retry = 0;
-        PE_parse_boot_argn("bc250retry", &retry, sizeof(retry));
-        gvmNoRetry = retry == 0;
         return true;
     }
 
@@ -2328,7 +2261,7 @@ namespace
     // offsets pointed the GPU at system memory 0-512 MB (the first Metal work hung the machine: IPI timeouts ~32 s
     // after boot). Linux adds vram_base_offset (gmc_v10_0_get_vm_pde, amdgpu_vm PTEs).
     // A VMID's page-table base comes from prepareVMInvalidateRequest (info +0x18 -> request +4/+0xC), used by the
-    // MMIO path (accelPdbWrite) and the in-ring SDMA VM program packet alike. bc250pte=0 keeps Apple's entries.
+    // MMIO path (accelPdbWrite) and the in-ring SDMA VM program packet alike.
     mach_vm_address_t orgGetPdeValue = 0, orgGetPteValue = 0, orgDecodePte = 0, orgPrepareVmInvalidate = 0;
     constexpr UInt64  kPteSystem = 1ULL << 1, kPteAddrMask = 0x0000FFFFFFFFF000ULL, kPdeAddrMask = 0x0000FFFFFFFFFFC0ULL;
 
@@ -2411,7 +2344,7 @@ namespace
     // ~436 MB: a Firefox GPU helper's write to an allocated VA (0x400004000) faulted on a PTB entry that was never
     // written (0), while the SDMA-written entries next to it were right. The carve-out is system RAM, so a VRAM block
     // past the BAR is mapped for the CPU at its physical address (uncached), and released again by
-    // completeVmBlockForCPUAccess. bc250ptcpu=0 keeps Apple's mapping.
+    // completeVmBlockForCPUAccess.
     mach_vm_address_t orgPrepareCpuAccess = 0, orgCompleteCpuAccess = 0;
     constexpr UInt64  kBc250BarSize       = 0x10000000;
     IOMemoryMap*      ownCpuMaps[32]      = {};
@@ -2467,8 +2400,7 @@ namespace
     // (prepareForCPUAccess, AMDGFX10HWMemory::prepare). The carve-out is system RAM the CPU reaches directly, so the
     // visible size is raised to the whole VRAM (hasInvisibleVRAM() is then false, as on a GPU with a resizable BAR)
     // and the virtual space mapOffset maps through (BAR0's descriptor) becomes the carve-out's physical range. Such a
-    // range is not managed RAM, so default mappings of it are uncached, as BAR mappings are. bc250fullvram=0 keeps
-    // Apple's 256 MB layout.
+    // range is not managed RAM, so default mappings of it are uncached, as BAR mappings are.
     mach_vm_address_t   orgSetVirtualSpace = 0;
     IOMemoryDescriptor* carveOutSpace      = nullptr;
     bool                fullVram = false, fullVramActive = false;
@@ -2518,7 +2450,7 @@ namespace
     // AMDAccelDevice::getHardwareInfo (0xbe619de) copies the hardware info (0x204 bytes, hardware +0xD0) for
     // the Metal driver and returns kIOReturnError when a clock (+0xC0 reference, +0xC8 system, +0xD0 memory, +0xD8 CG
     // reference) is 0, or +0x0 (16 bits), +0x18 or +0x20 is. Its copy gets the BC-250's clocks and the call succeeds
-    // when only the clocks failed (bc250clk=1); the hardware object keeps its zeros.
+    // when only the clocks failed; the hardware object keeps its zeros.
     constexpr UInt32  kInfoRefClk = 0xC0, kInfoSysClk = 0xC8, kInfoMemClk = 0xD0, kInfoCgRefClk = 0xD8;
     constexpr UInt32  kIOReturnErrorCode = 0xE00002BC;
     mach_vm_address_t orgAccelHwInfo = 0;
@@ -2526,7 +2458,7 @@ namespace
     UInt32 wrapAccelHwInfo(void* device, UInt8* out)
     {
         auto ret = FunctionCast(wrapAccelHwInfo, orgAccelHwInfo)(device, out);
-        if (out == nullptr || hwInfoClkMode() != 1) { return ret; }
+        if (out == nullptr) { return ret; }
         auto& ref = getMember<UInt64>(out, kInfoRefClk);
         auto& sys = getMember<UInt64>(out, kInfoSysClk);
         auto& mem = getMember<UInt64>(out, kInfoMemClk);
@@ -2546,14 +2478,14 @@ namespace
     // 0x00990001). Besides the MMIO writes (accelInvalidateRequest), with Metal running the requests also go into the
     // SDMA/PM4 rings (VM program packets, prepareVMInvalidateRequest +0x44) and are never acknowledged either: the GPU
     // stopped with the VM L2 busy (GCVM_L2_STATUS 1) and the fetcher waiting, eventTimeout came 10 s later, then the
-    // machine froze. At the source, every request is GVM's form, 0x02F80000 | vmids (bc250inv=0: Apple's).
+    // machine froze. At the source, every request is GVM's form, 0x02F80000 | vmids.
     mach_vm_address_t orgHubInvReq[5] = {};
 
     template<size_t I>
     UInt32 wrapHubInvReq(void* hub, UInt32 vmids, UInt32 flushType, UInt32 pdeBits)
     {
         const auto given = FunctionCast(wrapHubInvReq<I>, orgHubInvReq[I])(hub, vmids, flushType, pdeBits);
-        return accelInvalidateAsGvm() ? kInvReqGvm | (given & 0xFFFF) : given;
+        return kInvReqGvm | (given & 0xFFFF);
     }
 
     // SDMA's in-ring invalidation, AMDGFX10SDMAChannel::writeVMInvalidateCommand(buf, range, vmids): for the
@@ -2584,7 +2516,7 @@ namespace
 
     UInt32 wrapSdmaVmInvalidate(void* channel, UInt32* buf, const void* range, const UInt32* vmids)
     {
-        const bool gc       = vmids != nullptr && vmids[0] != 0 && accelInvalidateAsGvm();
+        const bool gc       = vmids != nullptr && vmids[0] != 0;
         const auto* tmpl    = gc && channel != nullptr ? sdmaGcInvTemplate(channel) : nullptr;
         const auto  extra   = tmpl != nullptr ? kSdmaGcInvDwords - kSdmaGpuvmInvDwords : 0;
         const auto  dwords  = FunctionCast(wrapSdmaVmInvalidate, orgSdmaVmInvalidate)(channel, buf, range, vmids);
@@ -2644,7 +2576,6 @@ namespace
     // its hardware channel from AMDGFX10Hardware::getHWChannel(channel type, priority, index) (hardware vtable
     // +0x320; channel groups are GFX, compute, 4 x SDMA = types 0, 1, 2): a compute request (type 1) gets the GFX
     // channel, so Metal's compute command buffers run on the GFX ring, which executes dispatches correctly.
-    // bc250compute=1 keeps Apple's MEC channels.
     mach_vm_address_t orgGetHwChannel = 0;
 
     void* wrapGetHwChannel(void* hw, UInt32 type, UInt32 priority, UInt32 index)
@@ -2658,16 +2589,12 @@ namespace
 
     void hookHwInfo(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
-        UInt32 compute = 0;
-        PE_parse_boot_argn("bc250compute", &compute, sizeof(compute));
-        if (compute == 0) {
-            KernelPatcher::RouteRequest channel {
-                "__ZN31AMDRadeonX6000_AMDGFX10Hardware12getHWChannelE18_eAMD_CHANNEL_TYPE11SS_PRIORITYj",
-                wrapGetHwChannel, orgGetHwChannel};
-            if (!patcher.routeMultiple(id, &channel, 1, slide, size) || orgGetHwChannel == 0) {
-                BCLOG("BC250HWL", "getHWChannel not hooked; compute stays on the MEC");
-                patcher.clearError();
-            }
+        KernelPatcher::RouteRequest channel {
+            "__ZN31AMDRadeonX6000_AMDGFX10Hardware12getHWChannelE18_eAMD_CHANNEL_TYPE11SS_PRIORITYj",
+            wrapGetHwChannel, orgGetHwChannel};
+        if (!patcher.routeMultiple(id, &channel, 1, slide, size) || orgGetHwChannel == 0) {
+            BCLOG("BC250HWL", "getHWChannel not hooked; compute stays on the MEC");
+            patcher.clearError();
         }
         KernelPatcher::RouteRequest profiler {"__ZN33AMDRadeonX6000_AMDChannelProfiler9configureEbyy",
             wrapProfilerConfigure, orgProfilerConfigure};
@@ -2686,9 +2613,6 @@ namespace
 
     void hookVmEntries(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
-        UInt32 pte = 1;
-        PE_parse_boot_argn("bc250pte", &pte, sizeof(pte));
-        if (pte == 0) { return; }
         KernelPatcher::RouteRequest requests[] = {
             {"__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy", wrapGetPdeValue, orgGetPdeValue},
             {"__ZN26AMDRadeonX6000_AMDGFX10VMM11getPTEValueE15eAMD_VMPT_LEVELyN24AMDRadeonX6000_IAMDHWVMM10VmMapFlagsEj",
@@ -2702,36 +2626,26 @@ namespace
             {"__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel20fillMapProcessPacketEP19PM4_MES_MAP_PROCESSyyjjj",
                 wrapFillMapProcess, orgFillMapProcess},
         };
-        UInt32 ptCpu = 1;
-        PE_parse_boot_argn("bc250ptcpu", &ptCpu, sizeof(ptCpu));
-        if (ptCpu != 0) {
-            KernelPatcher::RouteRequest cpu[] = {
-                {"__ZN29AMDRadeonX6000_AMDHWVMContext26prepareVmBlockForCPUAccessEyyPP11IOMemoryMap",
-                    wrapPrepareCpuAccess, orgPrepareCpuAccess},
-                {"__ZN29AMDRadeonX6000_AMDHWVMContext27completeVmBlockForCPUAccessEyPP11IOMemoryMap",
-                    wrapCompleteCpuAccess, orgCompleteCpuAccess},
-            };
-            if (!patcher.routeMultiple(id, cpu, arrsize(cpu), slide, size) || orgPrepareCpuAccess == 0 ||
-                orgCompleteCpuAccess == 0)
-            {
-                BCLOG("BC250HWL", "VM block CPU access hooks not installed");
-                patcher.clearError();
-            }
+        KernelPatcher::RouteRequest cpu[] = {
+            {"__ZN29AMDRadeonX6000_AMDHWVMContext26prepareVmBlockForCPUAccessEyyPP11IOMemoryMap",
+                wrapPrepareCpuAccess, orgPrepareCpuAccess},
+            {"__ZN29AMDRadeonX6000_AMDHWVMContext27completeVmBlockForCPUAccessEyPP11IOMemoryMap",
+                wrapCompleteCpuAccess, orgCompleteCpuAccess},
+        };
+        if (!patcher.routeMultiple(id, cpu, arrsize(cpu), slide, size) || orgPrepareCpuAccess == 0 ||
+            orgCompleteCpuAccess == 0)
+        {
+            BCLOG("BC250HWL", "VM block CPU access hooks not installed");
+            patcher.clearError();
         }
-        UInt32 fullVramArg = 1;
-        PE_parse_boot_argn("bc250fullvram", &fullVramArg, sizeof(fullVramArg));
-        if (fullVramArg != 0) {
-            KernelPatcher::RouteRequest space[] = {
-                {"__ZN26AMDRadeonX6000_AMDHWMemory15setVirtualSpaceEP18IOMemoryDescriptor", wrapSetVirtualSpace,
-                    orgSetVirtualSpace},
-            };
-            if (patcher.routeMultiple(id, space, arrsize(space), slide, size) && orgSetVirtualSpace != 0) {
-                fullVram = true;
-            }
-            else {
-                BCLOG("BC250HWL", "setVirtualSpace hook not installed; VRAM visibility unchanged");
-                patcher.clearError();
-            }
+        KernelPatcher::RouteRequest space {"__ZN26AMDRadeonX6000_AMDHWMemory15setVirtualSpaceEP18IOMemoryDescriptor",
+            wrapSetVirtualSpace, orgSetVirtualSpace};
+        if (patcher.routeMultiple(id, &space, 1, slide, size) && orgSetVirtualSpace != 0) {
+            fullVram = true;
+        }
+        else {
+            BCLOG("BC250HWL", "setVirtualSpace hook not installed; VRAM visibility unchanged");
+            patcher.clearError();
         }
         if (!patcher.routeMultiple(id, requests, arrsize(requests), slide, size)) {
             BCLOG("BC250HWL", "page-table entry hooks not installed");
@@ -2895,7 +2809,7 @@ namespace
 // collector trims (the reusable pruner runs on the +0xB60 pool only; +0xBC8 has no size limit); IOAccelResource2::
 // allocMemory then fails without releasing it. Opening many apps at 4K left 1.3-2.4 GB there with 7-80 MB of VRAM
 // free and thousands of "Failed to allocate". A non-reusable buffer goes to the other list and kicks the collector,
-// which frees it. Bit 28 is cleared (bc250vramreuse=1 keeps it) so freed VRAM is returned at once: no reuse cache;
+// which frees it. Bit 28 is cleared so freed VRAM is returned at once: no reuse cache;
 // buffers created before the accelerator is found keep their flag. Tahoe 26.7.1 layout.
 void BC250HWL::accelPoolTick()
 {
@@ -2906,30 +2820,19 @@ void BC250HWL::accelPoolTick()
         accel = IOService::copyMatchingService(match);
         match->release();
         if (accel == nullptr) { return; }
-        UInt32 reuse = 0;
-        PE_parse_boot_argn("bc250vramreuse", &reuse, sizeof(reuse));
-        auto&        config = getMember<UInt32>(accel, 0xC90);
-        const UInt32 was    = config;
-        if (reuse == 0) { config = was & ~0x10000000U; }
+        getMember<UInt32>(accel, 0xC90) &= ~0x10000000U;
     }
 }
 
 // SDMA1 never raises its trap (no client 9 source 0xE0 IV): its SDMA_CNTL TRAP_ENABLE (bit 0) stays clear while
 // SDMA0's is set once the accelerator enables its SDMA0 trap interrupt (IRQMgr), so SDMA1's fences complete unseen
-// (channel 14 timeouts, the display pipe's transactions waiting on them). Mirrored from SDMA0 every 0.2 s
-// (bc250sdma1trap=0 disables).
+// (channel 14 timeouts, the display pipe's transactions waiting on them). Mirrored from SDMA0 every 0.2 s.
 void BC250HWL::sdma1TrapPoll()
 {
-    static SInt32 mirror = -1;
-    if (mirror < 0) {
-        UInt32 trap = 1;
-        PE_parse_boot_argn("bc250sdma1trap", &trap, sizeof(trap));
-        mirror = trap != 0;
-    }
     // Only once the AMD kexts load: before that SDMA may be powered down, and reading the registers of a powered-down
     // block can hang the bus.
     auto& nred = NRed::singleton();
-    if (!mirror || !amdKextsLoaded || nred.getMMIOLength() == 0) { return; }
+    if (!amdKextsLoaded || nred.getMMIOLength() == 0) { return; }
     constexpr UInt32 kSdma0Cntl = 0x127C, kSdma1Cntl = 0x187C;
     const UInt32     s0 = nred.readReg32(kSdma0Cntl), s1 = nred.readReg32(kSdma1Cntl);
     if ((s0 & 1) != 0 && (s1 & 1) == 0 && s1 != 0xFFFFFFFF) { nred.writeReg32(kSdma1Cntl, s1 | 1); }
@@ -3064,16 +2967,12 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
     if (kext == Kext::Accel) {
         // The KIQ's first packet, SET_RESOURCES, with Linux's first dword (gfx_v10_0_kiq_set_resources: VMID_MASK 0,
         // unmap latency 0) instead of Apple's (all 16 VMIDs to the firmware scheduler, latency 0x28); with Apple's the
-        // MEC stalls decoding it. bc250kiq=0 keeps Apple's.
-        UInt32 kiq = 1;
-        PE_parse_boot_argn("bc250kiq", &kiq, sizeof(kiq));
-        if (kiq != 0) {
-            const PenguinWizardry::MaskedLookupPatch setResources {&kextRadeonX6000, kKiqSetResourcesOriginal,
-                kKiqSetResourcesPatched, sizeof(kKiqSetResourcesOriginal), 1};
-            if (!setResources.apply(patcher, slide, size)) {
-                BCLOG("BC250HWL", "KIQ SET_RESOURCES patch failed; Apple's");
-                patcher.clearError();
-            }
+        // MEC stalls decoding it.
+        const PenguinWizardry::MaskedLookupPatch setResources {&kextRadeonX6000, kKiqSetResourcesOriginal,
+            kKiqSetResourcesPatched, sizeof(kKiqSetResourcesOriginal), 1};
+        if (!setResources.apply(patcher, slide, size)) {
+            BCLOG("BC250HWL", "KIQ SET_RESOURCES patch failed; Apple's");
+            patcher.clearError();
         }
     }
     if (kext == Kext::Accel) { hookAccelRegisters(patcher, id, slide, size); }
@@ -3101,15 +3000,11 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
     }
     if (kext == Kext::Accel) {
-        UInt32 stats = 1;
-        PE_parse_boot_argn("bc250stats", &stats, sizeof(stats));
-        if (stats != 0) {
-            KernelPatcher::RouteRequest request {"__ZN26AMDRadeonX6000_AMDHardware19publishPMStatisticsEP12OSDictionaryb",
-                wrapPublishPMStatistics};
-            if (!patcher.routeMultiple(id, &request, 1, slide, size)) {
-                BCLOG("BC250HWL", "publishPMStatistics not replaced; GPU statistics stay Apple's");
-                patcher.clearError();
-            }
+        KernelPatcher::RouteRequest request {"__ZN26AMDRadeonX6000_AMDHardware19publishPMStatisticsEP12OSDictionaryb",
+            wrapPublishPMStatistics};
+        if (!patcher.routeMultiple(id, &request, 1, slide, size)) {
+            BCLOG("BC250HWL", "publishPMStatistics not replaced; GPU statistics stay Apple's");
+            patcher.clearError();
         }
     }
     if (kext == Kext::Accel) {

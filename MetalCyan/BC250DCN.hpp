@@ -27,11 +27,9 @@ private:
     UInt64            fbBase{0}, fbTop{0}, fbOffset{0};
     UInt32            appleVcoKHz{3600000};
     UInt32            lastDispDid{0}, lastDppDid{0};
-    size_t            pipeCtxSize{0};
     mach_vm_address_t orgPrepareSurface{0};
     mach_vm_address_t orgUpdateSurfaceInfo{0};
     mach_vm_address_t orgSetCursorImage{0};
-    mach_vm_address_t orgFindSecondaryPipe{0};
     mach_vm_address_t orgApplyPipeSplitFlags{0};
 
     bool   toUMA(UInt64& addr) const;
@@ -46,6 +44,5 @@ private:
     static UInt64 wrapUpdateSurfaceInfo(void* self, const void* plane, const void* displayPath);
     static UInt64 wrapSetCursorImage(void* self, const void* cursor);
     static int    wrapApplyPipeSplitFlags(void* dc, void* context, int vlevel, int* split, bool* merge);
-    static void*  wrapFindSecondaryPipe(void* dc, void* resCtx, const void* pool, const void* primary);
     static void   clockWatcherMain(void* arg, int waitResult);
 };
