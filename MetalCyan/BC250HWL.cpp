@@ -1418,6 +1418,31 @@ namespace
     constexpr UInt8  kPspFlagPerImageBuffers = 1;
     UInt8 pspFwList[kPspFwListMax][kPspFwEntrySize] {};
 
+    // The loads are only queued (per-image buffers, one handle each): nothing on Apple's path waits for them before
+    // GC starts the RLC (its autoload wait is replaced by Linux's RLC resume), while Linux waits for every load. The
+    // handles are kept and waited for with HWLibs' own psp_np_fw_load_wait_and_get_status(psp, handle, status)
+    // before the RLC is touched.
+    void*             pspContext = nullptr;
+    UInt32            pspFwHandles[kPspFwListMax] {};
+    UInt32            pspFwHandleCount = 0;
+    mach_vm_address_t pspFwWait        = 0;
+
+    void pspWaitFirmware()
+    {
+        if (pspContext == nullptr || pspFwHandleCount == 0) { return; }
+        if (pspFwWait == 0) {
+            IOSleep(500);
+            return;
+        }
+        auto wait = reinterpret_cast<UInt32 (*)(void*, UInt32, void*)>(pspFwWait);
+        for (UInt32 i = 0; i < pspFwHandleCount; i++) {
+            UInt8      status[16] {};
+            const auto ret = wait(pspContext, pspFwHandles[i], status);
+            if (ret != 0) { BCLOG("BC250HWL", "PSP: firmware load (handle %u) not done: %u", pspFwHandles[i], ret); }
+        }
+        pspFwHandleCount = 0;
+    }
+
     // The inverse of Apple's command type table for the ABI types loaded here.
     constexpr UInt32 pspAppleCmdType(UInt32 abiType)
     {
@@ -1543,8 +1568,12 @@ namespace
                 const auto* image = pspFwImage(cmd[4]);
                 const_cast<UInt32*>(cmd)[4] = pspAppleCmdType(image->abiType);
                 const auto ret = FunctionCast(wrapPspCmdSubmit, orgPspCmdSubmit)(psp, cmd, response, handle);
-                // With a handle (per-image buffers) the command is only queued: the SOS's status is not known here.
+                // With a handle (per-image buffers) the command is only queued (pspWaitFirmware).
                 if (ret != 0) { BCLOG("BC250HWL", "PSP: LOAD_IP_FW %s failed: 0x%X", image->name, ret); }
+                if (ret == 0 && handle != nullptr && *handle != 0 && pspFwHandleCount < arrsize(pspFwHandles)) {
+                    pspContext                          = psp;
+                    pspFwHandles[pspFwHandleCount++] = *handle;
+                }
                 return ret;
             }
             if (cmd[0] == kPspCmdSetupTmr) {
@@ -1618,7 +1647,13 @@ namespace
             {"hw_fini", kPspHwFiniPattern, sizeof(kPspHwFiniPattern), reinterpret_cast<mach_vm_address_t>(wrapPspHwFini),
                 orgPspHwFini, false},
         };
-        return hookBlock("PSP", hooks, patcher, id, slide, size);
+        if (!hookBlock("PSP", hooks, patcher, id, slide, size)) { return false; }
+        pspFwWait = patcher.solveSymbol(id, "_psp_np_fw_load_wait_and_get_status", slide, size);
+        if (pspFwWait == 0) {
+            BCLOG("BC250HWL", "psp_np_fw_load_wait_and_get_status not found; firmware loads get 500 ms");
+            patcher.clearError();
+        }
+        return true;
     }
 
     // GC's hw_init. gc.c's hw_init (0xc30e03e) runs GC 10.1's per-version tables (golden settings, RLC/CP/GFX setup
@@ -1990,6 +2025,7 @@ namespace
 
     UInt32 wrapGcRlcAutoloadCheck(void* gc)
     {
+        pspWaitFirmware();
         gcWriteReg(gc, kRlcCntl, gcReadReg(gc, kRlcCntl) & ~kRlcEnableF32);
         gcWriteReg(gc, kRlcCgcgCglsCtrl, 0);
         gcWriteReg(gc, kRlcPgCntl, 0);
