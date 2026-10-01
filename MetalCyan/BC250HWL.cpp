@@ -417,13 +417,12 @@ namespace
         FunctionCast(wrapUnmapDoorbellMemory, orgUnmapDoorbellMemory)(self);
     }
 
-    // Level 23: the accelerator's own register access. AMDHWRegisters::read/write (MMIO at +0x38, or MM_INDEX/DATA
-    // above the aperture) carry every accelerator register access; its read-modify-write helpers call them through
-    // the vtable. At level 23 every write is logged and not made (reads run and are logged), so the setup's register
-    // programming can be checked against Linux (gmc_v10_0, gfxhub/mmhub_v2_0) before it reaches the GPU.
+    // The accelerator's own register access. AMDHWRegisters::read/write (MMIO at +0x38, or MM_INDEX/DATA above the
+    // aperture) carry every accelerator register access; its read-modify-write helpers call them through the vtable.
+    // Writes are made only once the FB layout is known (fbOk).
     constexpr UInt32 kAccelLogMax = 3000;
     mach_vm_address_t orgAccelRegRead = 0, orgAccelRegWrite = 0, orgInitVramInfo = 0;
-    bool              accelLive = false;
+    bool              fbOk = false;    // The FB's offset and size are usable (checkFbLayout).
     UInt32            accelWrites = 0, accelReads = 0;
 
     // Level 26: VM TLB invalidations (GCVM_INVALIDATE_ENG*_* at 0x28A3-0x28D2, the MM hub's at 0x1A6E3-0x1A712) come in
@@ -437,7 +436,6 @@ namespace
     // Level 27 (defined after GVM's FB offset): page-table base writes of the accelerator.
     bool accelIsPdb(UInt32 reg);
     bool accelPdbWrite(void* regs, UInt32 reg, UInt32 value);
-    bool accelWritesLive();
     void gcCpBrief(const char* when);
 
     // Level 27: GC/MMVM_L2_PROTECTION_FAULT_CNTL and _CNTL2. Apple's initializeVmHardware writes 0x1FFC and 0 over
@@ -525,8 +523,7 @@ namespace
         const auto value = FunctionCast(wrapAccelRegRead, orgAccelRegRead)(regs, reg);
         if (accelIsInvalidate(reg)) {
             accelInvalidateReads++;
-            if (accelLive && reg >= kInvAckFirst && reg < kInvRangeFirst && value != 0 &&
-                cpProbeAck < kCpProbeMax) {
+            if (reg >= kInvAckFirst && reg < kInvRangeFirst && value != 0 && cpProbeAck < kCpProbeMax) {
                 cpProbeAck++;
                 BCLOG("BC250HWL", "Accel: VM invalidation ACK 0x%05X -> 0x%08X after %u ack reads", reg, value,
                     accelInvalidateReads);
@@ -542,45 +539,43 @@ namespace
     {
         if (accelIsInvalidate(reg)) {
             if ((++accelInvalidateWrites & 0x3FF) == 1) {
-                BCLOG("BC250HWL", "Accel%s: VM invalidation W 0x%05X = 0x%08X (%u invalidation writes, %u ack reads so far)",
-                    accelLive ? "" : " dry", reg, value, accelInvalidateWrites, accelInvalidateReads);
+                BCLOG("BC250HWL", "Accel: VM invalidation W 0x%05X = 0x%08X (%u invalidation writes, %u ack reads so far)",
+                    reg, value, accelInvalidateWrites, accelInvalidateReads);
             }
-            if (accelLive && accelInvalidateWrites <= 12) {
+            if (accelInvalidateWrites <= 12) {
                 cpProbeReq++;    // Counted for the log only.
                 BCLOG("BC250HWL", "Accel: VM invalidation W 0x%05X = 0x%08X (%s)", reg, value,
                     reg < kInvAckFirst ? "REQ" : reg < kInvRangeFirst ? "ACK" : "ADDR_RANGE");
             }
-            if (accelLive && accelIsInvalidateReq(reg) && accelInvalidateAsGvm()) {
+            if (accelIsInvalidateReq(reg) && accelInvalidateAsGvm()) {
                 accelInvalidateRequest(regs, reg, value);
-            } else if (accelLive) {
+            } else {
                 FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value);
             }
-            if (accelLive && reg >= kInvReqFirst && reg < kInvAckFirst &&
-                accelInvalidateWrites <= 12) {
+            if (reg >= kInvReqFirst && reg < kInvAckFirst && accelInvalidateWrites <= 12) {
                 gcCpBrief("after invalidation REQ");
             }
             return;
         }
         if (++accelWrites <= kAccelLogMax) {
-            BCLOG("BC250HWL", "Accel%s: W 0x%05X = 0x%08X", accelLive ? "" : " dry", reg, value);
+            BCLOG("BC250HWL", "Accel: W 0x%05X = 0x%08X", reg, value);
         }
-        if (accelWritesLive()) {
-            // GCMC_VM_MX_L1_TLB_CNTL: the first write of initializeVmHardware (powerUp); the CP was found stuck
-            // before the KIQ, so its state is taken here and after the VM setup's fault controls.
-            if (reg == 0x1260 + 0x1727) { gcCpBrief("before initializeVmHardware"); }
-            if ((reg == kGcFaultCntl || reg == kMmFaultCntl || reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1) &&
-                accelFaultCntlAsLinux()) {
-                const auto current = FunctionCast(wrapAccelRegRead, orgAccelRegRead)(regs, reg);
-                const bool cntl2   = reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1;
-                const auto asLinux = cntl2 ? current : (current & ~kFaultCntlLinuxBits) | (value & kFaultCntlLinuxBits);
-                BCLOG("BC250HWL", "Accel: W 0x%05X = 0x%08X, Apple's 0x%08X with the rest as Linux (reset 0x%08X)", reg,
-                    asLinux, value, current);
-                FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, asLinux);
-                if (reg == kMmFaultCntl + 1) { gcCpBrief("after VM fault controls"); }
-                return;
-            }
+        if (!fbOk) { return; }
+        // GCMC_VM_MX_L1_TLB_CNTL: the first write of initializeVmHardware (powerUp); the CP was found stuck
+        // before the KIQ, so its state is taken here and after the VM setup's fault controls.
+        if (reg == 0x1260 + 0x1727) { gcCpBrief("before initializeVmHardware"); }
+        if ((reg == kGcFaultCntl || reg == kMmFaultCntl || reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1) &&
+            accelFaultCntlAsLinux()) {
+            const auto current = FunctionCast(wrapAccelRegRead, orgAccelRegRead)(regs, reg);
+            const bool cntl2   = reg == kGcFaultCntl + 1 || reg == kMmFaultCntl + 1;
+            const auto asLinux = cntl2 ? current : (current & ~kFaultCntlLinuxBits) | (value & kFaultCntlLinuxBits);
+            BCLOG("BC250HWL", "Accel: W 0x%05X = 0x%08X, Apple's 0x%08X with the rest as Linux (reset 0x%08X)", reg,
+                asLinux, value, current);
+            FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, asLinux);
+            if (reg == kMmFaultCntl + 1) { gcCpBrief("after VM fault controls"); }
+            return;
         }
-        if (accelWritesLive() && accelIsContextCntl(reg) && (value & 1) != 0 &&
+        if (accelIsContextCntl(reg) && (value & 1) != 0 &&
             accelContextFaultDefaults())
         {
             const UInt32 withDefaults = value | kContextFaultDefaults;
@@ -591,9 +586,9 @@ namespace
             FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, withDefaults);
             return;
         }
-        if (accelWritesLive() && accelIsPdb(reg) && accelPdbWrite(regs, reg, value)) { return; }
-        if (accelWritesLive()) { FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value); }
-        if (accelWritesLive() && reg == kHdpFlushCntl && cpProbeHdp < kCpProbeMax) {
+        if (accelIsPdb(reg) && accelPdbWrite(regs, reg, value)) { return; }
+        FunctionCast(wrapAccelRegWrite, orgAccelRegWrite)(regs, reg, value);
+        if (reg == kHdpFlushCntl && cpProbeHdp < kCpProbeMax) {
             cpProbeHdp++;
             IODelay(100);
             gcCpBrief("after HDP flush");
@@ -647,7 +642,7 @@ namespace
             {"__ZN26AMDRadeonX6000_AMDHWMemory12initVRAMInfoEv", wrapInitVramInfo, orgInitVramInfo},
         };
         if (patcher.routeMultiple(id, requests, arrsize(requests), slide, size)) {
-            BCLOG("BC250HWL", "level 23: accelerator registers hooked (writes %s)", accelLive ? "made" : "logged, not made");
+            BCLOG("BC250HWL", "accelerator registers hooked");
         }
         else {
             // Without the write hook the setup would program the GPU unchecked: hold it back as at level 22.
@@ -1262,6 +1257,10 @@ namespace
     // The furthest SWIP of the boot order a level lets run hw_init: GVM from level 13, PSP from 15, GC from 18, SDMA
     // from 20.
     UInt32 hwLimit() { return kAllHwPosition; }
+    void   limitHw(UInt32 position)
+    {
+        if (position < hwAllowed) { hwAllowed = position; }
+    }
     UInt32 swipHwInitialised = 0;    // Bit per SWIP id whose hw_init ran.
 
     bool swipStubbed(UInt32 swip)
@@ -1398,15 +1397,12 @@ namespace
         }
     }
 
-    // Level 13: GVM's hw_init as a dry run. gvm.c's hw_init (0xc31f3e9: gvm, input, output) runs golden settings (per
-    // UMC/MMHUB/HDP/ATHUB, from a CGS query that returns none on Navi 10's path), then the hw_init of the UMC (8.0.0:
-    // software only), HDP (5.0.0: HDP_NONSURFACE_INFO, clock/memory power gating, MISC_CNTL), GC hub (10.1.10: VM
-    // apertures, GART, L2, contexts) and ATHUB (2.0.0) tables. GVM reaches the hardware only through its CGS wrappers
-    // (gvm_cgs.c): register write/write64/indirect write/indirect write64, reads, GPU memory alloc and copy. At this
-    // level every write and memory copy is logged and not made (reported as done), reads and allocations run and are
-    // logged, and so are GVM's setting reads by name and the golden-settings query. The result is the exact list of
-    // what GVM would program on the BC-250, to be checked against Linux's gmc_v10_0/gfxhub_v2_0/mmhub_v2_0/hdp_v5_0
-    // before any of it is let through. HDP memory power gating is turned off by setting (Linux: cg_flags = 0).
+    // GVM's hw_init. gvm.c's hw_init (0xc31f3e9: gvm, input, output) runs golden settings (per UMC/MMHUB/HDP/ATHUB,
+    // from a CGS query that returns none on Navi 10's path), then the hw_init of the UMC (8.0.0: software only), HDP
+    // (5.0.0: HDP_NONSURFACE_INFO, clock/memory power gating, MISC_CNTL), GC hub (10.1.10: VM apertures, GART, L2,
+    // contexts) and ATHUB (2.0.0) tables. GVM reaches the hardware only through its CGS wrappers (gvm_cgs.c): register
+    // write/write64/indirect write/indirect write64, reads, GPU memory alloc and copy. HDP memory power gating is
+    // turned off by setting (Linux: cg_flags = 0).
     const UInt8 kGvmWritePattern[]      = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8B, 0x87, 0x48, 0x0E, 0x00, 0x00, 0x49, 0x8B,
              0x40};
     const UInt8 kGvmWrite64Pattern[]    = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x89, 0xCB,
@@ -1440,14 +1436,13 @@ namespace
     bool gvmLogRead() { return ++gvmReads <= kGvmReadLogMax; }
     bool gvmLogOther() { return ++gvmOthers <= kGvmOtherLogMax; }
 
-    // Level 14: GVM's register writes and GPU memory copies are made. The level-13 dry run on the board showed they
-    // are Linux's gfxhub/mmhub_v2_0 GART enable (AGP off, system aperture = the FB, L2/L1 TLB, context 0 = GART),
+    // GVM's register writes and GPU memory copies are gfxhub/mmhub_v2_0 GART enable (AGP off, system aperture = the FB, L2/L1 TLB, context 0 = GART),
     // except that Apple's code, written for cards whose FB starts at physical 0, gives the hubs VRAM offsets where
     // physical addresses are needed. The BC-250's FB is a carve-out at GCMC_VM_FB_OFFSET (0x450000000); Linux adds it
     // (vram_base_offset) to the page-table base and the default/dummy page addresses. Level 14 does the same for
     // every such register pair of both hubs, when the value is inside the FB: the write to the low half is adjusted
     // and the carry goes to the later write to the same pair's high half. Write64 and indirect writes, not used by
-    // GVM's hw_init on the board, stay logged and not made. On the board the GART table's fill (GPU memory copies
+    // GVM's hw_init on the board, are logged and not made. On the board the GART table's fill (GPU memory copies
     // within it) falls back to GVM's own copy through the CP's register-driven DMA (GRBM_GFX_CNTL, uconfig
     // 0x2063-0x2067/0x20E8, CP_STAT polled), with FB MC addresses in the system aperture.
     struct GvmAddrPair
@@ -1467,7 +1462,6 @@ namespace
     // GCVM/MMVM_CONTEXT0_CNTL and their RETRY_PERMISSION_OR_INVALID_PAGE_FAULT bit.
     constexpr UInt32 kGcContext0Cntl = kGcBase + 0x1620, kMmContext0Cntl = kMmhubBase + 0x6C0, kContextRetry = 1U << 7;
 
-    bool   gvmLive      = false;
     bool   gvmNoRetry   = false;    // Level 27: context 0 without fault retry, as Linux.
     UInt64 gvmFbOffset  = 0, gvmFbSize = 0, gvmFbBase = 0;    // gvmFbBase: the FB's MC address.
     UInt32 gvmAdjusted  = 0;
@@ -1541,10 +1535,6 @@ namespace
     // HDP, ...).
     UInt64 wrapGvmWrite(void* gvm, UInt32 reg, UInt32 value, UInt32 ip)
     {
-        if (!gvmLive) {
-            if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM dry: W 0x%05X = 0x%08X (ip 0x%02X)", reg, value, ip); }
-            return 0;
-        }
         // Apple's GVM enables retry on context 0 (0x01555481); Linux's gfxhub/mmhub_v2_0_enable_system_domain clears
         // it, so a bad VMID0 translation faults (status and address logged) instead of retrying forever in the UTCL2.
         if (gvmNoRetry && (reg == kGcContext0Cntl || reg == kMmContext0Cntl) && (value & kContextRetry) != 0) {
@@ -1568,33 +1558,27 @@ namespace
     UInt64 wrapGvmWrite64(void* gvm, UInt32 reg, UInt64 value, UInt32 ip)
     {
         (void)gvm;
-        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM dry: W64 0x%05X = 0x%016llX (ip 0x%02X)", reg, value, ip); }
+        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM: W64 0x%05X = 0x%016llX (ip 0x%02X) not made", reg, value, ip); }
         return 0;
     }
 
     UInt64 wrapGvmWriteInd(void* gvm, UInt64 a, UInt64 b, UInt64 c, UInt64 d)
     {
         (void)gvm;
-        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM dry: indirect W (0x%llX, 0x%llX, 0x%llX, 0x%llX)", a, b, c, d); }
+        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM: indirect W (0x%llX, 0x%llX, 0x%llX, 0x%llX) not made", a, b, c, d); }
         return 0;
     }
 
     UInt64 wrapGvmWriteInd64(void* gvm, UInt64 a, UInt64 b, UInt64 c, UInt64 d)
     {
         (void)gvm;
-        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM dry: indirect W64 (0x%llX, 0x%llX, 0x%llX, 0x%llX)", a, b, c, d); }
+        if (gvmLogWrite()) { BCLOG("BC250HWL", "GVM: indirect W64 (0x%llX, 0x%llX, 0x%llX, 0x%llX) not made", a, b, c, d); }
         return 0;
     }
 
     // gvm_cgs_gpu_memory_copy(gvm, a, b, size): success is 1.
     UInt8 wrapGvmMemCopy(void* gvm, UInt64 a, UInt64 b, UInt64 size)
     {
-        if (!gvmLive) {
-            if (gvmLogWrite()) {
-                BCLOG("BC250HWL", "GVM dry: GPU memory copy 0x%llX <- 0x%llX, 0x%llX bytes", b, a, size);
-            }
-            return 1;
-        }
         const auto ret = FunctionCast(wrapGvmMemCopy, orgGvmMemCopy)(gvm, a, b, size);
         if (gvmLogWrite()) {
             BCLOG("BC250HWL", "GVM: GPU memory copy 0x%llX <- 0x%llX, 0x%llX bytes -> %u", b, a, size, ret);
@@ -1605,14 +1589,14 @@ namespace
     UInt32 wrapGvmRead(void* gvm, UInt32 reg, UInt32 ip)
     {
         const auto value = FunctionCast(wrapGvmRead, orgGvmRead)(gvm, reg, ip);
-        if (gvmLogRead()) { BCLOG("BC250HWL", "GVM dry: R 0x%05X -> 0x%08X (ip 0x%02X)", reg, value, ip); }
+        if (gvmLogRead()) { BCLOG("BC250HWL", "GVM: R 0x%05X -> 0x%08X (ip 0x%02X)", reg, value, ip); }
         return value;
     }
 
     UInt64 wrapGvmRead64(void* gvm, UInt32 reg, UInt32 ip)
     {
         const auto value = FunctionCast(wrapGvmRead64, orgGvmRead64)(gvm, reg, ip);
-        if (gvmLogRead()) { BCLOG("BC250HWL", "GVM dry: R64 0x%05X -> 0x%016llX (ip 0x%02X)", reg, value, ip); }
+        if (gvmLogRead()) { BCLOG("BC250HWL", "GVM: R64 0x%05X -> 0x%016llX (ip 0x%02X)", reg, value, ip); }
         return value;
     }
 
@@ -1622,7 +1606,7 @@ namespace
     {
         const auto handle = FunctionCast(wrapGvmAlloc, orgGvmAlloc)(gvm, size, alignment, type, out1, out2, out3);
         if (gvmLogOther()) {
-            BCLOG("BC250HWL", "GVM dry: alloc 0x%llX bytes (align 0x%X, type %u) -> handle 0x%llX, 0x%llX, 0x%llX, 0x%llX",
+            BCLOG("BC250HWL", "GVM: alloc 0x%llX bytes (align 0x%X, type %u) -> handle 0x%llX, 0x%llX, 0x%llX, 0x%llX",
                 size, alignment, type, handle, out1 ? *out1 : 0, out2 ? *out2 : 0, out3 ? *out3 : 0);
         }
         return handle;
@@ -1657,14 +1641,14 @@ namespace
             }
         }
         const auto ret = FunctionCast(wrapGvmHwInit, orgGvmHwInit)(gvm, input, output);
-        BCLOG("BC250HWL", "GVM hw_init (%s) <<< 0x%X after %u write(s) (%u address(es) given the FB offset), %u read(s)",
-            gvmLive ? "live" : "dry run", ret, gvmWrites, gvmAdjusted, gvmReads);
+        BCLOG("BC250HWL", "GVM hw_init <<< 0x%X after %u write(s) (%u address(es) given the FB offset), %u read(s)",
+            ret, gvmWrites, gvmAdjusted, gvmReads);
         return ret;
     }
 
-    // Level 14: GVM's writes are made once the FB's system address and size are known (FB location in 16 MB units,
-    // GCMC_VM_FB_LOCATION_BASE/TOP); otherwise the dry run stays.
-    void enableGvmLive()
+    // GPU init needs the FB's system address and size (FB location in 16 MB units, GCMC_VM_FB_LOCATION_BASE/TOP);
+    // without them it is refused.
+    bool checkFbLayout()
     {
         constexpr UInt32 kFbLocationBase = kGcBase + 0x1720, kFbLocationTop = kGcBase + 0x1721;
         auto&            nred = NRed::singleton();
@@ -1674,21 +1658,20 @@ namespace
         gvmFbSize             = top >= base ? static_cast<UInt64>(top - base + 1) << 24 : 0;
         gvmFbBase             = static_cast<UInt64>(base) << 24;
         if (gvmFbOffset == 0 || (gvmFbOffset & 0xFFFFF) != 0 || gvmFbSize == 0 || gvmFbSize > (16ULL << 30)) {
-            BCLOG("BC250HWL", "level 14: FB offset 0x%llX, size 0x%llX not usable; GVM stays a dry run", gvmFbOffset,
-                gvmFbSize);
-            return;
+            BCLOG("BC250HWL", "FB offset 0x%llX, size 0x%llX not usable; GPU init refused", gvmFbOffset, gvmFbSize);
+            return false;
         }
-        gvmLive = true;
-        BCLOG("BC250HWL", "level 14: GVM writes are made; FB offset 0x%llX added to its addresses below 0x%llX",
-            gvmFbOffset, gvmFbSize);
+        fbOk = true;
+        BCLOG("BC250HWL", "FB offset 0x%llX added to GVM's addresses below 0x%llX", gvmFbOffset, gvmFbSize);
         UInt32 retry = 0;
         PE_parse_boot_argn("bc250retry", &retry, sizeof(retry));
         gvmNoRetry = retry == 0;
-        BCLOG("BC250HWL", "level 27: VM context 0 fault retry %s", gvmNoRetry ? "off (as Linux)" : "on (Apple's)");
+        BCLOG("BC250HWL", "VM context 0 fault retry %s", gvmNoRetry ? "off (as Linux)" : "on (Apple's)");
+        return true;
     }
 
     // Returns false if a write path could not be hooked; GVM's hw_init must then not run.
-    bool hookGvmDryRun(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
+    bool hookGvm(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
         struct Hook
         {
@@ -1729,7 +1712,7 @@ namespace
         for (size_t i = 0; i < arrsize(hooks); i++) {
             at[i] = findUnique(hooks[i].pattern, nullptr, hooks[i].length, slide, size);
             if (at[i] == 0) {
-                BCLOG("BC250HWL", "level 13: GVM %s not found", hooks[i].name);
+                BCLOG("BC250HWL", "GVM %s not found", hooks[i].name);
                 if (hooks[i].guard) { return false; }
             }
         }
@@ -1738,7 +1721,7 @@ namespace
             KernelPatcher::RouteRequest request {nullptr, hooks[i].wrapper, hooks[i].org};
             request.from = at[i];
             if (!patcher.routeMultiple(id, &request, 1)) {
-                BCLOG("BC250HWL", "level 13: GVM %s failed to route", hooks[i].name);
+                BCLOG("BC250HWL", "GVM %s failed to route", hooks[i].name);
                 patcher.clearError();
                 if (hooks[i].guard) { return false; }
             }
@@ -1746,7 +1729,7 @@ namespace
         return true;
     }
 
-    // Level 15: PSP's hw_init as a dry run. psp.c's hw_init (0xc3544ba: psp, input, output) allocates its buffers,
+    // PSP's hw_init. psp.c's hw_init (0xc3544ba: psp, input, output) allocates its buffers,
     // then psp_hardware_initialization (0xc354953): bootloader ECC mode (only for input+0x18 modes 1-3), key DB,
     // sysdrv and SOS loads (each skipped while C2PMSG_81 is non-zero, i.e. the SOS runs, as on the BC-250 at boot),
     // KM ring create (psp_ring_create_11_0 0xc361e0f: wait C2PMSG_64 bit 31, ring address/size to C2PMSG_69-71,
@@ -1754,10 +1737,8 @@ namespace
     // DTM, RAS/WSPE/HDCP/security caps/AUC/FP/XGMI resumes and ring interrupts, each a GFX command through
     // psp_cmd_km_submit (0xc3582da: psp, command, response, handle; NootRX's firmware hook point). The BC-250's
     // SOS has no ASD or TAs (Linux loads none on PSP 11.0.8), and the firmware images PSP would load are Navi 10's.
-    // At this level every PSP register write (0xc357651: psp, reg, base index, value, ip) is logged and not made,
-    // reads (0xc35762a) run and are logged, the ring create is logged and reported done, and every command is logged
-    // (id and first dwords) and reported done without being submitted. The result is the list of commands PSP would
-    // send, to be matched against Linux's PSP 11.0.8 sequence before any reaches the SOS.
+    // Register writes (0xc357651: psp, reg, base index, value, ip), reads (0xc35762a), the ring create and every
+    // command go through the wrappers below.
     const UInt8 kPspWritePattern[]      = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8B, 0x4F, 0x08, 0x49, 0x8B, 0x41, 0x38, 0x48,
              0x85, 0xC0, 0x74, 0x12};
     const UInt8 kPspReadPattern[]       = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8B, 0x47, 0x08, 0x49, 0x8B, 0x40, 0x40, 0x48,
@@ -1777,8 +1758,7 @@ namespace
                       orgPspHwFini = 0;
     UInt32 pspWrites = 0, pspReads = 0, pspCmds = 0;
 
-    // Level 16: PSP's ring and TMR are made, with Linux's PSP 11.0.8 sequence as the reference (the dry run showed
-    // the differences):
+    // PSP's ring and TMR, with Linux's PSP 11.0.8 sequence as the reference:
     //  - no TOC: the BC-250 has none (Linux: no TOC, TMR PSP_TMR_SIZE = 4 MB). hw_init's input (+0x20 size, +0x28
     //    image) is passed on a copy without it, so Apple's TMR init keeps its 4 MB default and sends no LOAD_TOC;
     //  - commands: SETUP_TMR (5) and DESTROY_TMR (7) are submitted, the TMR only if it lies inside the FB and clear
@@ -1794,7 +1774,6 @@ namespace
     constexpr UInt32 kPspTocSize = 8, kPspTocImage = 10;    // hw_init input dwords.
     constexpr UInt64 kPspTmrScanoutGuard = 64ULL << 20;
 
-    bool pspLive = false;
     bool pspRingsDestroyed = false, pspTmrDestroyed = false;    // Linux's teardown completed.
 
     UInt32 wrapPspRead(void* psp, UInt32 reg, UInt32 baseIndex, UInt32 ip);
@@ -1804,12 +1783,6 @@ namespace
     void wrapPspWrite(void* psp, UInt32 reg, UInt32 baseIndex, UInt32 value, UInt32 ip)
     {
         const bool log = ++pspWrites <= kPspWriteLogMax;
-        if (!pspLive) {
-            if (log) {
-                BCLOG("BC250HWL", "PSP dry: W reg 0x%X (base %u) = 0x%08X (ip 0x%02X)", reg, baseIndex, value, ip);
-            }
-            return;
-        }
         if (reg == kPspC2PMsg64 && baseIndex == 0) {
             if (value == kPspCtrlEnableInt || value == kPspCtrlUnknownB) {
                 BCLOG("BC250HWL", "PSP: control 0x%X to C2PMSG_64 dropped (Linux does not send it)", value);
@@ -1837,18 +1810,13 @@ namespace
     {
         const auto value = FunctionCast(wrapPspRead, orgPspRead)(psp, reg, baseIndex, ip);
         if (++pspReads <= kPspReadLogMax) {
-            BCLOG("BC250HWL", "PSP%s: R reg 0x%X (base %u) -> 0x%08X (ip 0x%02X)", pspLive ? "" : " dry", reg,
-                baseIndex, value, ip);
+            BCLOG("BC250HWL", "PSP: R reg 0x%X (base %u) -> 0x%08X (ip 0x%02X)", reg, baseIndex, value, ip);
         }
         return value;
     }
 
     UInt32 wrapPspRingCreate(void* psp, UInt32 type)
     {
-        if (!pspLive) {
-            BCLOG("BC250HWL", "PSP dry: ring create (type %u) not made, reported done", type);
-            return 0;
-        }
         const auto ret = FunctionCast(wrapPspRingCreate, orgPspRingCreate)(psp, type);
         BCLOG("BC250HWL", "PSP: ring create (type %u) <<< 0x%X, C2PMSG_64 0x%08X", type, ret,
             pspReadRaw(psp, kPspC2PMsg64));
@@ -1927,7 +1895,6 @@ namespace
     constexpr UInt32 kPspFwEntryLength = 0x18, kPspFwListMax = 24;
     constexpr UInt32 kPspFwCount = 1, kPspFwList = 2;    // hw_init input dwords.
 
-    bool   fwLive = false;
     constexpr UInt32 kPspFlags = 0x28;
     constexpr UInt8  kPspFlagPerImageBuffers = 1;
     UInt8  pspFwList[kPspFwListMax][kPspFwEntrySize] {};
@@ -2039,7 +2006,7 @@ namespace
 
     bool pspCommandAllowed(const UInt32* cmd)
     {
-        if (cmd[0] == kPspCmdLoadIpFw) { return fwLive && pspFwImage(cmd[4]) != nullptr; }
+        if (cmd[0] == kPspCmdLoadIpFw) { return pspFwImage(cmd[4]) != nullptr; }
         if (cmd[0] == kPspCmdDestroyTmr) { return true; }
         if (cmd[0] != kPspCmdSetupTmr) { return false; }
         const UInt64 address = (static_cast<UInt64>(cmd[2]) << 32) | cmd[1];
@@ -2056,7 +2023,7 @@ namespace
     UInt32 wrapPspCmdSubmit(void* psp, const UInt32* cmd, UInt32* response, UInt32* handle)
     {
         if (cmd == nullptr) { return FunctionCast(wrapPspCmdSubmit, orgPspCmdSubmit)(psp, cmd, response, handle); }
-        if (pspLive && pspCommandAllowed(cmd)) {
+        if (pspCommandAllowed(cmd)) {
             if (cmd[0] == kPspCmdLoadIpFw) {
                 // psp_cmd_km_buf_prep translates the command's type through Apple's table (c358aec: 2->3 CE, 3->2 PFP,
                 // 4->1 ME, 5->5, 6->6, 7->4 MEC, 11->8 RLC_G, 12->9 SDMA0, 13->10 SDMA1), so it is given the Apple
@@ -2078,7 +2045,7 @@ namespace
                 }
                 return ret;
             }
-            if (cmd[0] == kPspCmdSetupTmr && fwLive) {
+            if (cmd[0] == kPspCmdSetupTmr) {
                 // Level 17: SETUP_TMR as Linux's psp_prep_tmr_cmd_buf builds it: besides the TMR's GPU address, its
                 // system physical address (the BC-250's FB is a carve-out at GCMC_VM_FB_OFFSET) with virt_phy_addr
                 // set (+0x10 flags bit 1, +0x14/+0x18 the address). Apple sends only the GPU address; with it the SOS
@@ -2099,8 +2066,8 @@ namespace
             return ret;
         }
         if (++pspCmds <= kPspCmdLogMax) {
-            BCLOG("BC250HWL", "PSP%s: command %u not submitted, reported done: %08X %08X %08X %08X %08X %08X %08X %08X",
-                pspLive ? "" : " dry", cmd[0], cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6], cmd[7]);
+            BCLOG("BC250HWL", "PSP: command %u not submitted, reported done: %08X %08X %08X %08X %08X %08X %08X %08X",
+                cmd[0], cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6], cmd[7]);
         }
         if (handle != nullptr) { *handle = 0; }
         return 0;
@@ -2116,7 +2083,7 @@ namespace
             }
             // Level 16: the same input without the TOC (the input's size is its first dword).
             const UInt32 bytes = input[0];
-            if (pspLive && bytes >= (kPspTocImage + 2) * sizeof(UInt32) && bytes <= sizeof(copy)) {
+            if (bytes >= (kPspTocImage + 2) * sizeof(UInt32) && bytes <= sizeof(copy)) {
                 memcpy(copy, input, bytes);
                 copy[kPspTocSize]  = 0;
                 copy[kPspTocImage] = copy[kPspTocImage + 1] = 0;
@@ -2124,7 +2091,7 @@ namespace
                 BCLOG("BC250HWL", "PSP hw_init: TOC removed from the input (Linux loads none on PSP 11.0.8)");
                 // Level 17: the firmware list with the BC-250's images.
                 const auto* list = *reinterpret_cast<const UInt8* const*>(&copy[kPspFwList]);
-                if (fwLive && list != nullptr && copy[kPspFwCount] <= kPspFwListMax) {
+                if (list != nullptr && copy[kPspFwCount] <= kPspFwListMax) {
                     const auto count = pspFwRebuildList(list, copy[kPspFwCount]);
                     BCLOG("BC250HWL", "PSP firmware: list of %u Navi 10 image(s) rebuilt as %u cyan_skillfish2 image(s)",
                         copy[kPspFwCount], count);
@@ -2138,25 +2105,25 @@ namespace
         // 4 KB aligned, memory type 3), as Linux gives each ucode its own page in its fw buffer, instead of one shared
         // 1 MB VRAM buffer. With the shared buffer the SOS took RLC_G, ME, CE and PFP and refused MEC (0xFFFF300F) and
         // SDMA0 (0xFFFF0006) whatever the order and TMR.
-        if (fwLive && psp != nullptr) {
+        if (psp != nullptr) {
             getMember<UInt8>(psp, kPspFlags) |= kPspFlagPerImageBuffers;
             BCLOG("BC250HWL", "PSP firmware: per-image staging buffers (flags 0x%02X)", getMember<UInt8>(psp, kPspFlags));
         }
         const auto ret = FunctionCast(wrapPspHwInit, orgPspHwInit)(psp, input, output);
-        BCLOG("BC250HWL", "PSP hw_init (%s) <<< 0x%X after %u write(s), %u read(s), %u command(s) not submitted, "
+        BCLOG("BC250HWL", "PSP hw_init <<< 0x%X after %u write(s), %u read(s), %u command(s) not submitted, "
                           "%u firmware image(s) loaded, %u failed",
-            pspLive ? "live" : "dry run", ret, pspWrites, pspReads, pspCmds, fwLoaded, fwFailed);
+            ret, pspWrites, pspReads, pspCmds, fwLoaded, fwFailed);
         return ret;
     }
 
     UInt32 wrapPspHwFini(void* psp)
     {
         const auto ret = FunctionCast(wrapPspHwFini, orgPspHwFini)(psp);
-        BCLOG("BC250HWL", "PSP hw_fini (%s) <<< 0x%X", pspLive ? "live" : "dry run", ret);
+        BCLOG("BC250HWL", "PSP hw_fini <<< 0x%X", ret);
         // Apple's cleanup also stops and frees a UM ring (type 1: control 0xB0000, dropped here) that its hw_init never
         // created, which fails on its own. Once the TMR is destroyed and Linux's DESTROY_RINGS is acknowledged, the
         // PSP is left as Linux leaves it: report success.
-        if (pspLive && ret != 0 && pspTmrDestroyed && pspRingsDestroyed) {
+        if (ret != 0 && pspTmrDestroyed && pspRingsDestroyed) {
             BCLOG("BC250HWL", "PSP hw_fini: TMR destroyed and rings destroyed as Linux does; reported done");
             return 0;
         }
@@ -2164,7 +2131,7 @@ namespace
     }
 
     // Returns false if a write or submit path could not be hooked; PSP's hw_init must then not run.
-    bool hookPspDryRun(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
+    bool hookPsp(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
         struct Hook
         {
@@ -2213,13 +2180,11 @@ namespace
         return true;
     }
 
-    // Level 18: GC's hw_init as a dry run. gc.c's hw_init (0xc30e03e) runs GC 10.1's per-version tables (golden
-    // settings, RLC/CP/GFX setup through gc_10_1_ip*.c), too large to check by reading. GC reaches the hardware only
-    // through its CGS wrappers (gc_cgs.c): write (0xc31143a, +0x38), write_ext (0xc3113fc, +0x100), write_ext2
-    // (0xc311475, +0x120), read (0xc3114b3, +0x40), read_ext2 (0xc3114f4, +0x118), and the golden-settings query
-    // (0xc311598, +0x90). At this level every write is logged and not made, reads and the golden query run and are
-    // logged, so the log is the list of what GC would program on the BC-250, to be checked against Linux's gfx_v10_0
-    // (Cyan Skillfish: golden_settings_gc_10_0_cyan_skillfish, RLC_PG_CNTL bit 23, no GFXOFF, CU harvest masks).
+    // GC's hw_init. gc.c's hw_init (0xc30e03e) runs GC 10.1's per-version tables (golden settings, RLC/CP/GFX setup
+    // through gc_10_1_ip*.c). GC reaches the hardware only through its CGS wrappers (gc_cgs.c): write (0xc31143a,
+    // +0x38), write_ext (0xc3113fc, +0x100), write_ext2 (0xc311475, +0x120), read (0xc3114b3, +0x40), read_ext2
+    // (0xc3114f4, +0x118), and the golden-settings query (0xc311598, +0x90). Reference: Linux's gfx_v10_0 (Cyan
+    // Skillfish: golden_settings_gc_10_0_cyan_skillfish, RLC_PG_CNTL bit 23, no GFXOFF, CU harvest masks).
     const UInt8 kGcWritePattern[]     = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8B, 0x47, 0x08, 0x49, 0x8B, 0x40, 0x38, 0x48,
             0x85, 0xC0, 0x74, 0x07, 0x49, 0x8B, 0x78, 0x08, 0x5D, 0xFF, 0xE0, 0x48, 0x8D, 0x15, 0x8C};
     const UInt8 kGcWriteExtPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8B, 0x47, 0x08, 0x49, 0x8B, 0x80, 0x00, 0x01,
@@ -2259,10 +2224,8 @@ namespace
     }
 
     // Arguments after the GC context are logged as passed (register, value, block/instance for the plain ones).
-    // Level 19: GC's writes are made (gcLive), except Navi 10's SPM sample delays (RLC_SPM_*_SAMPLEDELAY_IND_ADDR/DATA,
-    // hundreds of pairs), which Linux does not program on Cyan Skillfish (init_spm_golden covers Navi 10/12/14 only):
-    // those are counted and dropped at every level.
-    bool gcLive = false;
+    // Navi 10's SPM sample delays (RLC_SPM_*_SAMPLEDELAY_IND_ADDR/DATA, hundreds of pairs) are counted and dropped:
+    // Linux does not program them on Cyan Skillfish (init_spm_golden covers Navi 10/12/14 only).
     bool gcRlcStartPending = false;
     void gcRlcStart(void* gc);
     void gcCpSnapshot(void* gc);
@@ -2281,21 +2244,20 @@ namespace
             return 0;
         }
         if (++gcWrites <= kGcWriteLogMax) {
-            BCLOG("BC250HWL", "GC%s: W%s (0x%llX, 0x%llX, 0x%llX, 0x%llX) from +0x%llX", gcLive ? "" : " dry", kind, a, b,
-                c, d, gcCaller(caller));
+            BCLOG("BC250HWL", "GC: W%s (0x%llX, 0x%llX, 0x%llX, 0x%llX) from +0x%llX", kind, a, b, c, d,
+                gcCaller(caller));
         }
         // Level 27: the PM4 engine's start halts the MEC (CP_MEC_CNTL MEC_ME1/ME2_HALT) when its KIQ does not answer;
         // the CP's state is captured first.
-        if (gcLive && a == kCpMecCntl && (b & kCpMecHalt) == kCpMecHalt) { gcCpSnapshot(gc); }
+        if (a == kCpMecCntl && (b & kCpMecHalt) == kCpMecHalt) { gcCpSnapshot(gc); }
         // The CP before the KIQ's MEC is unhalted and once its queue is enabled, before SET_RESOURCES: shows whether
         // the fetcher (CPF, shared by GFX and compute) is already busy, e.g. on the GFX ring.
-        if (gcLive && a == kCpMecCntl && b == 0) {
+        if (a == kCpMecCntl && b == 0) {
             gcCpBrief("before MEC unhalt");
             pspRingStatusDump();
         }
-        UInt64 ret = 0;
-        if (gcLive) { ret = reinterpret_cast<UInt64 (*)(void*, UInt64, UInt64, UInt64, UInt64)>(*Org)(gc, a, b, c, d); }
-        if (gcLive && a == kCpPqStatus) {
+        const auto ret = reinterpret_cast<UInt64 (*)(void*, UInt64, UInt64, UInt64, UInt64)>(*Org)(gc, a, b, c, d);
+        if (a == kCpPqStatus) {
             IODelay(1000);
             gcCpBrief("KIQ enabled, 1 ms");
         }
@@ -2330,7 +2292,7 @@ namespace
         if (++gcReads <= kGcReadLogMax) {
             mach_vm_address_t from = 0;
             kextOf(reinterpret_cast<mach_vm_address_t>(__builtin_return_address(0)), &from);
-            BCLOG("BC250HWL", "GC dry: R 0x%05llX -> 0x%08X (0x%llX, 0x%llX) from +0x%llX", a, value, b, c, from);
+            BCLOG("BC250HWL", "GC: R 0x%05llX -> 0x%08X (0x%llX, 0x%llX) from +0x%llX", a, value, b, c, from);
         }
         return value;
     }
@@ -2341,7 +2303,7 @@ namespace
         if (++gcReads <= kGcReadLogMax) {
             mach_vm_address_t from = 0;
             kextOf(reinterpret_cast<mach_vm_address_t>(__builtin_return_address(0)), &from);
-            BCLOG("BC250HWL", "GC dry: R ext2 (0x%llX, 0x%llX, 0x%llX, 0x%llX) -> 0x%08X from +0x%llX", a, b, c, d, value,
+            BCLOG("BC250HWL", "GC: R ext2 (0x%llX, 0x%llX, 0x%llX, 0x%llX) -> 0x%08X from +0x%llX", a, b, c, d, value,
                 from);
         }
         return value;
@@ -2456,11 +2418,11 @@ namespace
 
     UInt32 wrapGcHwInit(void* gc, void* input, void* output)
     {
-        BCLOG("BC250HWL", "GC hw_init (%s) >>>", gcLive ? "live" : "dry run");
-        if (gcLive) { gcUnlockCus(gc); }
+        BCLOG("BC250HWL", "GC hw_init >>>");
+        gcUnlockCus(gc);
         const auto ret = FunctionCast(wrapGcHwInit, orgGcHwInit)(gc, input, output);
-        BCLOG("BC250HWL", "GC hw_init (%s) <<< 0x%X after %u write(s) (+%u SPM sample-delay writes dropped), %u read(s)",
-            gcLive ? "live" : "dry run", ret, gcWrites, gcSpmWrites, gcReads);
+        BCLOG("BC250HWL", "GC hw_init <<< 0x%X after %u write(s) (+%u SPM sample-delay writes dropped), %u read(s)",
+            ret, gcWrites, gcSpmWrites, gcReads);
         return ret;
     }
 
@@ -2584,7 +2546,7 @@ namespace
     // and gfx_v10_0_rlc_resume then stops the RLC, turns off CG (RLC_CGCG_CGLS_CTRL = 0) and PG (RLC_PG_CNTL = 0) and
     // starts it (rlc_start: RLC_PG_CNTL bit 23, no RLC-SMU handshake without GFXOFF; RLC_CNTL.RLC_ENABLE_F32; 50 us).
     // Apple's code after the wait (clear-state buffer, SRM) is Linux's autoload-branch order, with the RLC running.
-    // The wait is replaced by that sequence through GC's own register functions (logged, not made, in the dry run).
+    // The wait is replaced by that sequence through GC's own register functions.
     const UInt8 kGcRlcAutoloadCheckPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x45, 0x31,
         0xF6, 0x80, 0xBF, 0x22};
     constexpr UInt32 kGcBase1 = 0xA000, kGcBlock = 0xB;
@@ -2602,16 +2564,16 @@ namespace
         constexpr UInt32 kRlcGpmGeneral6 = 0xA000 + 0x4C69;
         gcWriteReg(gc, kRlcCntl, gcReadReg(gc, kRlcCntl) | kRlcEnableF32);
         IODelay(50);
-        BCLOG("BC250HWL", "GC: RLC started%s: RLC_CNTL 0x%08X, RLC_STAT 0x%08X, RLC_GPM_STAT 0x%08X, bootload 0x%08X, "
+        BCLOG("BC250HWL", "GC: RLC started: RLC_CNTL 0x%08X, RLC_STAT 0x%08X, RLC_GPM_STAT 0x%08X, bootload 0x%08X, "
                           "GPM_GENERAL_6 0x%08X, RLC_PG_CNTL 0x%08X",
-            gcLive ? "" : " (dry run)", gcReadReg(gc, kRlcCntl), gcReadReg(gc, kRlcStat), gcReadReg(gc, kRlcGpmStat),
+            gcReadReg(gc, kRlcCntl), gcReadReg(gc, kRlcStat), gcReadReg(gc, kRlcGpmStat),
             gcReadReg(gc, kRlcBootload), gcReadReg(gc, kRlcGpmGeneral6), gcReadReg(gc, kRlcPgCntl));
         IODelay(1000);
         BCLOG("BC250HWL", "GC: 1 ms later: RLC_CNTL 0x%08X, RLC_STAT 0x%08X, RLC_GPM_STAT 0x%08X", gcReadReg(gc, kRlcCntl),
             gcReadReg(gc, kRlcStat), gcReadReg(gc, kRlcGpmStat));
         // Diagnostic: RLC_CNTL reads 0 after the start. Which of its bits hold (READ_CACHE_DISABLE, bit 2, is inert)
         // tells a write-protected register from an F32 that will not stay enabled; GRBM status shows what is busy.
-        if (!gcLive || (gcReadReg(gc, kRlcCntl) & kRlcEnableF32) != 0) { return; }
+        if ((gcReadReg(gc, kRlcCntl) & kRlcEnableF32) != 0) { return; }
         constexpr UInt32 kRlcReadCacheDisable = 1U << 2, kGrbmStatus = 0x1260 + 0xDA4, kGrbmStatus2 = 0x1260 + 0xDA2;
         constexpr UInt32 kRlcSafeMode = 0xA000 + 0x4C05;
         gcWriteReg(gc, kRlcCntl, kRlcReadCacheDisable);
@@ -2934,7 +2896,7 @@ namespace
     }
 
     // Returns false if a write path could not be hooked; GC's hw_init must then not run.
-    bool hookGcDryRun(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
+    bool hookGc(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
         struct Hook
         {
@@ -3008,7 +2970,7 @@ namespace
         return true;
     }
 
-    // Level 20: SDMA's hw_init as a dry run. sdma.c's hw_init (0xc363ceb: sdma, input, output) fills the queue
+    // SDMA's hw_init. sdma.c's hw_init (0xc363ceb: sdma, input, output) fills the queue
     // interface, checks the doorbell range and runs sdma_init_hw_internal (0xc365086): golden settings, the engine
     // start (+0x2f0, SDMA 5.0's 0xc365951) once, the MGCG/MGLS updates (+0x2d0/+0x2d8) and a restart of the queues
     // already created (none at boot). The engine start is Linux's sdma_v5_0_start for PSP-loaded microcode (SDMA_CNTL
@@ -3045,7 +3007,6 @@ namespace
 
     mach_vm_address_t orgSdmaWrite = 0, orgSdmaWriteExt2 = 0, orgSdmaRead = 0, orgSdmaReadExt2 = 0, orgSdmaGolden = 0,
                       orgSdmaCheckUcode = 0, orgSdmaMgcg = 0, orgSdmaMgls = 0, orgSdmaHwInit = 0;
-    bool   sdmaLive   = false;
     UInt32 sdmaWrites = 0, sdmaReads = 0;
 
     // The register the CGS layer reaches (base added unless the hardware id is 3).
@@ -3060,10 +3021,9 @@ namespace
     UInt64 wrapSdmaWrite(void* sdma, UInt64 reg, UInt64 base, UInt64 value, UInt64 hwId)
     {
         if (++sdmaWrites <= kSdmaLogMax) {
-            BCLOG("BC250HWL", "SDMA%s: W 0x%05X = 0x%08llX (reg 0x%llX, base %llu, hw 0x%llX)", sdmaLive ? "" : " dry",
+            BCLOG("BC250HWL", "SDMA: W 0x%05X = 0x%08llX (reg 0x%llX, base %llu, hw 0x%llX)",
                 sdmaAbs(sdma, reg, base, hwId), value & 0xFFFFFFFF, reg, base, hwId);
         }
-        if (!sdmaLive) { return 0; }
         if (!sdmaLinuxValue(sdma, reg, base, hwId, 1, value)) { return 0; }
         return FunctionCast(wrapSdmaWrite, orgSdmaWrite)(sdma, reg, base, value, hwId);
     }
@@ -3110,10 +3070,9 @@ namespace
     UInt64 wrapSdmaWriteExt2(void* sdma, UInt64 reg, UInt64 base, UInt64 value, UInt64 hwId, UInt64 flag)
     {
         if (++sdmaWrites <= kSdmaLogMax) {
-            BCLOG("BC250HWL", "SDMA%s: W ext2 0x%05X = 0x%08llX (reg 0x%llX, base %llu, hw 0x%llX, 0x%llX)",
-                sdmaLive ? "" : " dry", sdmaAbs(sdma, reg, base, hwId), value & 0xFFFFFFFF, reg, base, hwId, flag);
+            BCLOG("BC250HWL", "SDMA: W ext2 0x%05X = 0x%08llX (reg 0x%llX, base %llu, hw 0x%llX, 0x%llX)",
+                sdmaAbs(sdma, reg, base, hwId), value & 0xFFFFFFFF, reg, base, hwId, flag);
         }
-        if (!sdmaLive) { return 0; }
         if (!sdmaLinuxValue(sdma, reg, base, hwId, flag, value)) { return 0; }
         return FunctionCast(wrapSdmaWriteExt2, orgSdmaWriteExt2)(sdma, reg, base, value, hwId, flag);
     }
@@ -3169,9 +3128,9 @@ namespace
 
     UInt32 wrapSdmaHwInit(void* sdma, void* input, void* output)
     {
-        BCLOG("BC250HWL", "SDMA hw_init (%s) >>> hw 0x%X, bases 0x%X 0x%X 0x%X 0x%X, SDMA_ID value 0x%X, MGCG/MGLS off "
+        BCLOG("BC250HWL", "SDMA hw_init >>> hw 0x%X, bases 0x%X 0x%X 0x%X 0x%X, SDMA_ID value 0x%X, MGCG/MGLS off "
                           "%u/%u, direct load %u, started %u, SR-IOV %u/%u",
-            sdmaLive ? "live" : "dry run", getMember<UInt32>(sdma, kSdmaHwId), getMember<UInt32>(sdma, kSdmaBases),
+            getMember<UInt32>(sdma, kSdmaHwId), getMember<UInt32>(sdma, kSdmaBases),
             getMember<UInt32>(sdma, kSdmaBases + 4), getMember<UInt32>(sdma, kSdmaBases + 8),
             getMember<UInt32>(sdma, kSdmaBases + 12), getMember<UInt32>(sdma, kSdmaIdValue),
             getMember<UInt8>(sdma, 0x27C), getMember<UInt8>(sdma, 0x27D), getMember<UInt8>(sdma, kSdmaDirectLoad),
@@ -3184,24 +3143,21 @@ namespace
         sdmaInHwInit   = true;
         const auto ret = FunctionCast(wrapSdmaHwInit, orgSdmaHwInit)(sdma, input, output);
         sdmaInHwInit   = false;
-        BCLOG("BC250HWL", "SDMA hw_init (%s) <<< 0x%X after %u write(s), %u read(s)", sdmaLive ? "live" : "dry run", ret,
-            sdmaWrites, sdmaReads);
-        if (sdmaLive) {
-            // The engine state as Linux's ring test would find it: F32 running, status.
-            const UInt32 hw = getMember<UInt32>(sdma, kSdmaHwId);
-            const UInt32 off = hw == 0x24 ? kSdmaInstanceStride : 0;
-            BCLOG("BC250HWL", "SDMA hw 0x%X after start: F32_CNTL 0x%08X, SDMA_CNTL 0x%08X, STATUS 0x%08X, UTCL1_CNTL "
-                              "0x%08X, UTCL1_PAGE 0x%08X",
-                hw, wrapSdmaReadExt2(sdma, off + 0x2A, 0, hw, 1), wrapSdmaReadExt2(sdma, off + kSdmaCntl, 0, hw, 1),
-                wrapSdmaReadExt2(sdma, off + 0x25, 0, hw, 1), wrapSdmaReadExt2(sdma, off + kSdmaUtcl1Cntl, 0, hw, 1),
-                wrapSdmaReadExt2(sdma, off + kSdmaUtcl1Page, 0, hw, 1));
-        }
+        BCLOG("BC250HWL", "SDMA hw_init <<< 0x%X after %u write(s), %u read(s)", ret, sdmaWrites, sdmaReads);
+        // The engine state as Linux's ring test would find it: F32 running, status.
+        const UInt32 hw = getMember<UInt32>(sdma, kSdmaHwId);
+        const UInt32 off = hw == 0x24 ? kSdmaInstanceStride : 0;
+        BCLOG("BC250HWL", "SDMA hw 0x%X after start: F32_CNTL 0x%08X, SDMA_CNTL 0x%08X, STATUS 0x%08X, UTCL1_CNTL "
+                          "0x%08X, UTCL1_PAGE 0x%08X",
+            hw, wrapSdmaReadExt2(sdma, off + 0x2A, 0, hw, 1), wrapSdmaReadExt2(sdma, off + kSdmaCntl, 0, hw, 1),
+            wrapSdmaReadExt2(sdma, off + 0x25, 0, hw, 1), wrapSdmaReadExt2(sdma, off + kSdmaUtcl1Cntl, 0, hw, 1),
+            wrapSdmaReadExt2(sdma, off + kSdmaUtcl1Page, 0, hw, 1));
         return ret;
     }
 
     // Returns false if any hook is missing; SDMA's hw_init must then not run (each one is a difference from Linux,
     // and the hw_init wrapper turns off direct loading).
-    bool hookSdmaDryRun(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
+    bool hookSdma(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
     {
         struct Hook
         {
@@ -3352,8 +3308,6 @@ namespace
         write(reg, static_cast<UInt32>(result >> 32));
         return true;
     }
-
-    bool accelWritesLive() { return accelLive && gvmLive && gvmFbOffset != 0; }
 
     // Level 28: the accelerator's own page tables (per-process VMIDs). AMDGFX10VMM::getPDEValue(level, address) and
     // getPTEValue(level, address, flags, fragment) mask the address in and add flags only; both the CPU and the SDMA
@@ -3558,9 +3512,9 @@ namespace
         auto&        total   = getMember<UInt64>(memory, 0x40);
         auto&        visible = getMember<UInt64>(memory, 0x48);
         const UInt64 bar     = visible;
-        if (!gvmLive || total == 0 || bar >= total || total > gvmFbSize) {
-            BCLOG("BC250HWL", "full VRAM: not applied (GVM %s, VRAM 0x%llX, visible 0x%llX, carve-out 0x%llX)",
-                gvmLive ? "live" : "dry", total, bar, gvmFbSize);
+        if (!fbOk || total == 0 || bar >= total || total > gvmFbSize) {
+            BCLOG("BC250HWL", "full VRAM: not applied (VRAM 0x%llX, visible 0x%llX, carve-out 0x%llX)", total, bar,
+                gvmFbSize);
             return;
         }
         if (carveOutSpace == nullptr) {
@@ -4058,61 +4012,38 @@ namespace
                 // refused for every SWIP.
                 BCLOG("BC250HWL", "level 12: PCIE extended-tag guard not installed; hw_init stays refused");
                 patcher.clearError();
-                hwAllowed = 0;
+                limitHw(0);
             }
-            {
-                if (hookGvmDryRun(patcher, id, slide, size)) {
-                    BCLOG("BC250HWL", "level 13: GVM dry run hooked: its register writes and GPU memory copies are "
-                                      "logged, not made");
-                    enableGvmLive();
-                }
-                else if (hwAllowed >= kGvmHwPosition) {
-                    BCLOG("BC250HWL", "level 13: GVM dry run not installed; GVM hw_init refused");
-                    hwAllowed = kGvmHwPosition - 1;
-                }
+            // Without a usable FB layout, or with any of a block's hooks missing, hw_init stops before that block.
+            if (!checkFbLayout()) {
+                limitHw(kGvmHwPosition - 1);
             }
-            {
-                if (hookPspDryRun(patcher, id, slide, size)) {
-                    BCLOG("BC250HWL", "level 15: PSP dry run hooked: its register writes, ring create and commands "
-                                      "are logged, not made");
-                    {
-                        pspLive = gvmLive;
-                        fwLive  = pspLive;
-                        if (fwLive) {
-                            const PenguinWizardry::MaskedLookupPatch tmrAlign {&kextRadeonX6000HWLibs,
-                                kPspTmrAlignOriginal, kPspTmrAlignPatched, sizeof(kPspTmrAlignOriginal), 1};
-                            const bool aligned = tmrAlign.apply(patcher, slide, size);
-                            if (!aligned) { patcher.clearError(); }
-                            BCLOG("BC250HWL", "level 17: TMR alignment %s", aligned ? "4 MB" : "patch failed, 1 MB");
-                        }
-                        BCLOG("BC250HWL", "level 16: PSP ring and TMR %s", pspLive ? "made (ASD, TAs, TOC and "
-                            "firmware loads still logged, not sent)" : "stay a dry run (GVM is not live)");
-                        if (fwLive) {
-                            BCLOG("BC250HWL", "level 17: PSP loads the BC-250's cyan_skillfish2 microcode (ME, PFP, "
-                                              "CE, MEC, MEC2, RLC_G, SDMA0/1)");
-                        }
-                    }
+            else {
+                if (!hookGvm(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "GVM hooks not installed; GVM hw_init refused");
+                    limitHw(kGvmHwPosition - 1);
                 }
-                else if (hwAllowed >= kPspHwPosition) {
-                    BCLOG("BC250HWL", "level 15: PSP dry run not installed; PSP hw_init refused");
-                    hwAllowed = kPspHwPosition - 1;
+                if (hookPsp(patcher, id, slide, size)) {
+                    const PenguinWizardry::MaskedLookupPatch tmrAlign {&kextRadeonX6000HWLibs, kPspTmrAlignOriginal,
+                        kPspTmrAlignPatched, sizeof(kPspTmrAlignOriginal), 1};
+                    const bool aligned = tmrAlign.apply(patcher, slide, size);
+                    if (!aligned) { patcher.clearError(); }
+                    BCLOG("BC250HWL", "PSP TMR alignment %s", aligned ? "4 MB" : "patch failed, 1 MB");
+                }
+                else {
+                    BCLOG("BC250HWL", "PSP hooks not installed; PSP hw_init refused");
+                    limitHw(kPspHwPosition - 1);
+                }
+                if (!hookGc(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "GC hooks not installed; GC hw_init refused");
+                    limitHw(kGcHwPosition - 1);
+                }
+                if (!hookSdma(patcher, id, slide, size)) {
+                    BCLOG("BC250HWL", "SDMA hooks not installed; SDMA hw_init refused");
+                    limitHw(kSdmaHwPosition - 1);
                 }
             }
-            {
-                hookGcLog(patcher, id, slide, size);
-                if (hookGcDryRun(patcher, id, slide, size)) {
-                    BCLOG("BC250HWL", "level 18: GC dry run hooked: its register writes are logged, not made");
-                    {
-                        gcLive = fwLive;
-                        BCLOG("BC250HWL", "level 19: GC's writes %s", gcLive ? "are made (SPM sample delays dropped)"
-                                                                       : "stay a dry run (firmware not loaded live)");
-                    }
-                }
-                else if (hwAllowed >= kGcHwPosition) {
-                    BCLOG("BC250HWL", "level 18: GC dry run not installed; GC hw_init refused");
-                    hwAllowed = kGcHwPosition - 1;
-                }
-            }
+            hookGcLog(patcher, id, slide, size);
             {
                 const auto at = findUnique(kIpiQueryPattern, nullptr, sizeof(kIpiQueryPattern), slide, size);
                 KernelPatcher::RouteRequest request {nullptr, wrapIpiQuery, orgIpiQuery};
@@ -4124,28 +4055,13 @@ namespace
                 const bool vcnOk = vcn != 0 && patcher.routeMultipleShort(id, &vcnRequest, 1);
                 if (!vcnOk) { patcher.clearError(); }
                 if (vcnOk && at != 0 && patcher.routeMultiple(id, &request, 1)) {
-                    BCLOG("BC250HWL", "level 22: IPI query router and VCN context hooked (stubbed VCN absent)");
+                    BCLOG("BC250HWL", "IPI query router and VCN context hooked (stubbed VCN absent)");
                 }
                 else {
                     // Without it TTL's post-init calls into the empty VCN context: keep TTL short of completing.
                     patcher.clearError();
-                    hwAllowed = kSdmaHwPosition;
-                    BCLOG("BC250HWL", "level 22: IPI query router or VCN context not hooked; hw_init stops after "
-                                      "SDMA");
-                }
-            }
-            {
-                if (hookSdmaDryRun(patcher, id, slide, size)) {
-                    BCLOG("BC250HWL", "level 20: SDMA dry run hooked: its register writes are logged, not made");
-                    {
-                        sdmaLive = gcLive;
-                        BCLOG("BC250HWL", "level 21: SDMA's writes %s", sdmaLive ? "are made (Linux's engine start "
-                            "values)" : "stay a dry run (GC is not live)");
-                    }
-                }
-                else if (hwAllowed >= kSdmaHwPosition) {
-                    BCLOG("BC250HWL", "level 20: SDMA dry run not installed; SDMA hw_init refused");
-                    hwAllowed = kSdmaHwPosition - 1;
+                    limitHw(kSdmaHwPosition);
+                    BCLOG("BC250HWL", "IPI query router or VCN context not hooked; hw_init stops after SDMA");
                 }
             }
             if (providerLookup != 0) {
@@ -4397,7 +4313,6 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
     }
     if (kext == Kext::Accel) { guardUnmapDoorbellMemory(patcher, id, slide, size); }
     if (kext == Kext::Accel) {
-        accelLive = true;
         // Level 27: the KIQ's first packet, SET_RESOURCES, with Linux's first dword (gfx_v10_0_kiq_set_resources:
         // VMID_MASK 0, unmap latency 0) instead of Apple's (all 16 VMIDs to the firmware scheduler, latency 0x28);
         // with Apple's the MEC stalls decoding it (level 27 runs). bc250kiq=0 keeps Apple's.
