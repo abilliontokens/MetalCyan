@@ -303,31 +303,20 @@ void BC250::processPatcher()
     registerSysctls();
     BCLOG("BC250", "ASRock BC-250 / AMD Cyan Skillfish detected.");
 
-    if (checkKernelArgument("-BC250FB")) { this->mode = Mode::Framebuffer; }
-
-    if (checkKernelArgument("-BC250NoProbe")) {
-        BCLOG("BC250", "Hardware probe disabled by -BC250NoProbe.");
-    }
-    else {
-        this->probe();
-    }
-
-    if (this->mode == Mode::Framebuffer && !checkKernelArgument("-BC250NoProbe") && this->info.carveOutMiB == 0) {
-        BCLOG("BC250", "Refusing framebuffer mode: the probe could not read the VRAM carve-out size.");
+    // Acceleration (the bring-up's survey level 28) is the only mode; -MCOff disables the kext.
+    this->mode = Mode::Framebuffer;
+    this->probe();
+    if (this->info.carveOutMiB == 0) {
+        BCLOG("BC250", "Could not read the VRAM carve-out size; leaving the GPU to the firmware framebuffer.");
         this->mode = Mode::Probe;
     }
-
-    this->hwlSurvey = this->mode == Mode::Framebuffer && checkKernelArgument("-BC250HWL");
+    this->hwlSurvey = this->mode == Mode::Framebuffer;
+    this->hwlLevel  = 28;
     if (this->hwlSurvey) {
-        PE_parse_boot_argn("bc250hwl", &this->hwlLevel, sizeof(this->hwlLevel));
-        BCLOG("BC250", "HWServices/HWLibs survey enabled (-BC250HWL), level %u.", this->hwlLevel);
         UInt32 flush = 1;
         PE_parse_boot_argn("bc250flush", &flush, sizeof(flush));
-        if (this->hwlLevel >= 28 && flush != 0) { bc250StartLogFlush(); }
+        if (flush != 0) { bc250StartLogFlush(); }
     }
-
-    BCLOG("BC250", "Mode: %s", this->mode == Mode::Framebuffer ? "framebuffer (experimental, -BC250FB)" :
-                                                                 "probe only (no Apple kext is patched)");
 
     // SMU telemetry (read-only messages; bc250smu=0 disables): GPU/CPU clocks, voltages, Tctl, core mask.
     BC250Smu::singleton().start();
