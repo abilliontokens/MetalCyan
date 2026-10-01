@@ -39,7 +39,6 @@ class DriverInjector
     mach_vm_address_t orgAddDrivers{0};
     UInt8             matchedDrivers{0};
     bool              bc250AccelInjected{false};
-    Driver            drivers[4];
     Driver            bc250Drivers[2];    // -BC250FB: framebuffer; -BC250HWL: also HWServices.
 
 public:

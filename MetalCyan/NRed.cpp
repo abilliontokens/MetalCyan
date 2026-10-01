@@ -4,18 +4,13 @@
 // See LICENSE for details.
 
 #include <AGDP.hpp>
-#include <AppleGFXHDA.hpp>
 #include <BC250.hpp>
 #include <BC250HWL.hpp>
-#include <Backlight.hpp>
-#include <DebugEnabler.hpp>
 #include <DriverInjector.hpp>
 #include <GPUDriversAMD/ATOMBIOS.hpp>
 #include <GPUDriversAMD/CAIL/Result.hpp>
-#include <GPUDriversAMD/RavenIPOffset.hpp>
 #include <GPUDriversAMD/SMU.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
-#include <HWLibs.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_devinfo.hpp>
 #include <Headers/kern_iokit.hpp>
@@ -31,7 +26,6 @@
 #include <Regs/GC.hpp>
 #include <Regs/NBIO.hpp>
 #include <Regs/SMU.hpp>
-#include <X5000.hpp>
 #include <X6000FB.hpp>
 #include <kern/clock.h>
 #include <libkern/OSTypes.h>
@@ -44,23 +38,13 @@ NRed& NRed::singleton() { return moduleInstance; }
 
 void NRed::init()
 {
-    SYSLOG("NRed", "|-----------------------------------------------------------------|");
-    SYSLOG("NRed", "| Copyright 2022-2025 ChefKiss.                                   |");
-    SYSLOG("NRed", "| If you've paid for this, you've been scammed. Ask for a refund! |");
-    SYSLOG("NRed", "| Do not support tonymacx86. Support us, we truly care.           |");
-    SYSLOG("NRed", "| Change the world for the better.                                |");
-    SYSLOG("NRed", "|-----------------------------------------------------------------|");
-
-    Backlight::singleton().init();
+    SYSLOG("MetalCyan", "MetalCyan, based on NootedRed (c) 2022-2025 ChefKiss");
 
     lilu.onKextLoadForce(&kextRadeonX6000Framebuffer);
     lilu.onKextLoadForce(&kextRadeonX6000HWServices);
     lilu.onKextLoadForce(&kextRadeonX6000HWLibs);
     lilu.onKextLoadForce(&kextRadeonX6000);
-    lilu.onKextLoadForce(&kextRadeonX5000HWLibs);
-    lilu.onKextLoadForce(&kextRadeonX5000);
     lilu.onKextLoadForce(&kextAGDP);
-    lilu.onKextLoadForce(&kextAppleGFXHDA);
 
     lilu.onPatcherLoadForce(
         [](void* const, KernelPatcher& patcher)
@@ -76,13 +60,8 @@ void NRed::init()
         [](void* const, KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
         {
             AGDP::singleton().processKext(patcher, id, slide, size);
-            Backlight::singleton().processKext(patcher, id, slide, size);
-            DebugEnabler::singleton().processKext(patcher, id, slide, size);
             X6000FB::singleton().processKext(patcher, id, slide, size);
             BC250HWL::singleton().processKext(patcher, id, slide, size);
-            AppleGFXHDA::singleton().processKext(patcher, id, slide, size);
-            X5000HWLibs::singleton().processKext(patcher, id, slide, size);
-            X5000::singleton().processKext(patcher, id, slide, size);
         },
         nullptr);
 }
@@ -118,47 +97,7 @@ void NRed::hwLateInit()
 
     this->mapMMIO();
 
-    if (this->attributes.isCyanSkillfish()) {
-        this->hwLateInitCyanSkillfish();
-        return;
-    }
-
-    this->fbOffset    = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
-    this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
-                        >> RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_SHIFT;
-
-    if (this->attributes.isRenoir()) {
-        if (!this->attributes.isGreenSardine() && this->devRevision == 0 && this->pciRevision >= 0x80
-            && this->pciRevision <= 0x84)
-        {
-            this->attributes.setRenoirE();
-        }
-    }
-    else {
-        if (this->devRevision >= 0x8) {
-            this->attributes.setRaven2();
-            this->enumRevision = 0x79;
-        }
-        else if (this->attributes.isPicasso()) {
-            this->enumRevision = 0x41;
-        }
-        else if (this->devRevision == 1) {
-            this->enumRevision = 0x20;
-        }
-        else {
-            this->enumRevision = 0x1;
-        }
-    }
-
-    DBGLOG("NRed", "deviceID = 0x%X", this->deviceID);
-    DBGLOG("NRed", "pciRevision = 0x%X", this->pciRevision);
-    DBGLOG("NRed", "fbOffset = 0x%llX", this->fbOffset);
-    DBGLOG("NRed", "devRevision = 0x%X", this->devRevision);
-    DBGLOG("NRed", "isPicasso = %s", this->attributes.isPicasso() ? "true" : "false");
-    DBGLOG("NRed", "isRaven2 = %s", this->attributes.isRaven2() ? "true" : "false");
-    DBGLOG("NRed", "isRenoir = %s", this->attributes.isRenoir() ? "true" : "false");
-    DBGLOG("NRed", "isGreenSardine = %s", this->attributes.isGreenSardine() ? "true" : "false");
-    DBGLOG("NRed", "enumRevision = 0x%X", this->enumRevision);
+    this->hwLateInitCyanSkillfish();
 }
 
 void NRed::processPatcher()
@@ -184,27 +123,11 @@ void NRed::processPatcher()
 
     this->deviceID = static_cast<UInt16>(WIOKit::readPCIConfigValue(this->iGPU, WIOKit::kIOPCIConfigDeviceID));
     switch (this->deviceID) {
-        case 0x15D8: {
-            this->attributes.setPicasso();
-        } break;
-        case 0x15DD: {
-        } break;
-        case 0x164C:
-        case 0x1636: {
-            this->attributes.setRenoir();
-            this->enumRevision = 0x91;
-        } break;
-        case 0x15E7:
-        case 0x1638: {
-            this->attributes.setRenoir();
-            this->attributes.setGreenSardine();
-            this->enumRevision = 0xA1;
-        } break;
         case 0x13FE:      // ASRock BC-250
         case 0x143F: {    // Other Cyan Skillfish 2 SKU
             this->attributes.setCyanSkillfish();
         } break;
-        default: PANIC("NRed", "Unknown device ID: 0x%X", this->deviceID);
+        default: PANIC("NRed", "Not a Cyan Skillfish GPU: 0x%X", this->deviceID);
     }
     this->pciRevision = static_cast<UInt8>(WIOKit::readPCIConfigValue(this->iGPU, WIOKit::kIOPCIConfigRevisionID));
 

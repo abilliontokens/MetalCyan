@@ -17,32 +17,14 @@
 
 static DriverInjector moduleInstance;
 
-static const char com_apple_kext_AMDRadeonX5000[] = {
-#embed "Personalities/com.apple.kext.AMDRadeonX5000.xml" suffix(, '\0')
-};
-static const char com_apple_kext_AMDRadeonX5000HWServices[] = {
-#embed "Personalities/com.apple.kext.AMDRadeonX5000HWServices.xml" suffix(, '\0')
-};
-static const char com_apple_kext_AMDRadeonX6000Framebuffer[] = {
-#embed "Personalities/com.apple.kext.AMDRadeonX6000Framebuffer.xml" suffix(, '\0')
-};
 static const char bc250_com_apple_kext_AMDRadeonX6000Framebuffer[] = {
 #embed "Personalities/BC250/com.apple.kext.AMDRadeonX6000Framebuffer.xml" suffix(, '\0')
 };
 static const char bc250_com_apple_kext_AMDRadeonX6000HWServices[] = {
 #embed "Personalities/BC250/com.apple.kext.AMDRadeonX6000HWServices.xml" suffix(, '\0')
 };
-static const char com_apple_driver_AppleGFXHDA[] = {
-#embed "Personalities/com.apple.driver.AppleGFXHDA.xml" suffix(, '\0')
-};
 
 DriverInjector::DriverInjector() :
-    drivers{
-        Driver("com.apple.kext.AMDRadeonX6000Framebuffer", com_apple_kext_AMDRadeonX6000Framebuffer),
-        Driver("com.apple.driver.AppleGFXHDA", com_apple_driver_AppleGFXHDA),
-        Driver("com.apple.kext.AMDRadeonX5000", com_apple_kext_AMDRadeonX5000),
-        Driver("com.apple.kext.AMDRadeonX5000HWServices", com_apple_kext_AMDRadeonX5000HWServices),
-    },
     bc250Drivers{
         Driver("com.apple.kext.AMDRadeonX6000Framebuffer", bc250_com_apple_kext_AMDRadeonX6000Framebuffer),
         Driver("com.apple.kext.AMDRadeonX6000HWServices", bc250_com_apple_kext_AMDRadeonX6000HWServices),
@@ -112,13 +94,9 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
         auto* bundleIdentifier = OSDynamicCast(OSString, dict->getObject("CFBundleIdentifier"));
         if (bundleIdentifier == nullptr || bundleIdentifier->getLength() == 0) { continue; }
 
-        Driver* toInject      = singleton().drivers;
-        size_t  toInjectCount = checkKernelArgument("-NRedNoAccel") ? 2 : arrsize(singleton().drivers);
-        if (NRed::singleton().getAttributes().isCyanSkillfish()) {
-            toInject      = singleton().bc250Drivers;
-            // Framebuffer with -BC250FB; HWServices too with -BC250HWL (survey, see BC250HWL.cpp).
-            toInjectCount = !BC250::singleton().isFramebufferMode() ? 0 : BC250::singleton().isHWLSurvey() ? 2 : 1;
-        }
+        Driver* toInject = singleton().bc250Drivers;
+        // Framebuffer with -BC250FB; HWServices too with -BC250HWL (survey, see BC250HWL.cpp).
+        size_t toInjectCount = !BC250::singleton().isFramebufferMode() ? 0 : BC250::singleton().isHWLSurvey() ? 2 : 1;
         for (size_t identifierIndex = 0; identifierIndex < toInjectCount; identifierIndex += 1) {
             auto& driver = toInject[identifierIndex];
 
