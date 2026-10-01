@@ -803,17 +803,38 @@ namespace
     UInt32   ttlLogLines = 0;
 
     // TTL passes its own string constants; anything else is not dereferenced.
-    const char* hwlibsString(const char* s)
+    bool hwlibsString(const char* s)
     {
         const auto a = reinterpret_cast<mach_vm_address_t>(s);
-        return a >= hwlibsStart && a < hwlibsEnd ? s : "?";
+        return a >= hwlibsStart && a < hwlibsEnd;
+    }
+
+    // HWLibs messages every boot of the BC-250 prints, by function: PSP's bootloader steps (skipped, the SOS runs at
+    // boot) and ring interrupt, GC's discovery buffer (answered by wrapIpiBgmGetIpConfig), the KIQ/queue alignment
+    // notes, SDMA's cache policy (Linux's values on purpose) and the OCA pool note.
+    constexpr const char* kExpectedHwlibsMessages[] = {"psp_hardware_initialization", "psp_ring_enable_interrupt_11_0",
+        "IpiBgmGetIpConfigFromDiscovery", "gc_initialize_kiq_engine_10_1", "gc_create_gfx_queue_10_1",
+        "sdma_5_0_start_dma_queue", "sdma_5_0_start_paging_queue", "sdma_5_0_start_engine", "gc_dump_feature_status"};
+
+    // Logs a HWLibs message unless it is expected; strings outside HWLibs (other debug prints share the GC logger's
+    // empty body) are not dereferenced.
+    void hwlibsLog(const char* module, const char* function, UInt32 line, const char* message)
+    {
+        if (!hwlibsString(function) || !hwlibsString(message)) { return; }
+        for (const auto* expected : kExpectedHwlibsMessages) {
+            if (strcmp(function, expected) == 0) { return; }
+        }
+        char   text[160];
+        size_t n = 0;
+        for (; n + 1 < sizeof(text) && message[n] != '\0'; n++) { text[n] = message[n]; }
+        while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == ' ')) { n--; }
+        text[n] = '\0';
+        BCLOG(module, "%s:%u %s", function, line, text);
     }
 
     void wrapTtlLog(void* cookie, const char* function, const char* file, UInt32 line, const char* message)
     {
-        if (++ttlLogLines <= kTtlLogMax) {
-            BCLOG("TTL", "%s:%u %s", hwlibsString(function), line, hwlibsString(message));
-        }
+        if (++ttlLogLines <= kTtlLogMax) { hwlibsLog("TTL", function, line, message); }
         if (orgTtlLog != nullptr) { orgTtlLog(cookie, function, file, line, message); }
     }
 
@@ -1912,16 +1933,12 @@ namespace
     // It is routed with a 5-byte jump (it has 6 bytes) to a logger; the original is never called.
     const UInt8 kGcLogPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3, 0xB8, 0x02, 0x00, 0x00, 0x00, 0x48, 0x85, 0xFF,
         0x74, 0x3C};
-    constexpr UInt32 kGcLogMax = 60;
+    constexpr UInt32 kGcLogMax = 200;
     UInt32           gcLogs    = 0;
 
-    void wrapGcLog(void* gc, UInt32 level, const char* function, const char* file, UInt32 line, const char* message)
+    void wrapGcLog(void*, UInt32, const char* function, const char*, UInt32 line, const char* message)
     {
-        (void)gc;
-        (void)file;
-        if (++gcLogs <= kGcLogMax) {
-            BCLOG("BC250HWL", "GC: %s:%u %s (level %u)", hwlibsString(function), line, hwlibsString(message), level);
-        }
+        if (++gcLogs <= kGcLogMax) { hwlibsLog("HWLibs", function, line, message); }
     }
 
     void hookGcLog(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
