@@ -12,7 +12,7 @@
 //  bc250cores=8          CPU core unlock as rw-r-r-0644/bc250-core-unlock (MIT): if the core presence mask (SMN 0x5A870)
 //                        reads the stock 0x77, SMU queue 3 message 0x98 with argument 0x5A870 sets it to 0xFF; the
 //                        extra cores appear after a warm reboot (Restart; a power-off reverts it). macOS also needs the
-//                        AMD_Vanilla core-count patches set to 8 (scripts/bc250-set-cores.sh).
+//                        AMD_Vanilla core-count patches set to 8.
 //  bc250cpumhz=N         CPU max boost clock, 3500-4500 MHz (queue 3 0x8F), always with an undervolt: the VID-curve
 //                        scale (0x50, -50..0) is predicted with bc250_smu_oc's model for bc250cpuvmax and set once
 //                        (no run-time adjustment). As bc250_smu_oc: extra voltage off (0x9A 1) first.
