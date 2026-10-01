@@ -4292,8 +4292,10 @@ void BC250HWL::sdma1TrapPoll()
         PE_parse_boot_argn("bc250sdma1trap", &trap, sizeof(trap));
         mirror = trap != 0;
     }
+    // Only once the AMD kexts load (surveyLevel is set then): before that SDMA may be powered down, and reading the
+    // registers of a powered-down block can hang the bus.
     auto& nred = NRed::singleton();
-    if (!mirror || nred.getMMIOLength() == 0) { return; }
+    if (!mirror || surveyLevel < 28 || nred.getMMIOLength() == 0) { return; }
     constexpr UInt32 kSdma0Cntl = 0x127C, kSdma1Cntl = 0x187C;
     const UInt32     s0 = nred.readReg32(kSdma0Cntl), s1 = nred.readReg32(kSdma1Cntl);
     if ((s0 & 1) != 0 && (s1 & 1) == 0 && s1 != 0xFFFFFFFF) { nred.writeReg32(kSdma1Cntl, s1 | 1); }

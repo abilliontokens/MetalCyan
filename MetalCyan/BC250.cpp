@@ -58,6 +58,7 @@ SYSCTL_PROC(_debug_bc250, OID_AUTO, log, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_L
 // SDMA1's trap enable follows SDMA0's (BC250HWL::sdma1TrapPoll), checked every 0.2 s on a thread of its own.
 static void bc250PollThread(void*, wait_result_t)
 {
+    IOSleep(2000);
     while (true) {
         BC250HWL::singleton().sdma1TrapPoll();
         IOSleep(200);
