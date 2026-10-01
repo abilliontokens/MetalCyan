@@ -41,7 +41,7 @@ void DriverInjector::processPatcher(KernelPatcher& patcher)
                "Failed to route addDrivers");
 }
 
-// BC-250 survey level 4+: a copy of AMDRadeonX6000's own Navi 10 accelerator personality, matching the BC-250.
+// A copy of AMDRadeonX6000's own Navi 10 accelerator personality, matching the BC-250.
 // Copying keeps every property Apple ships with it (Metal/GL plug-in names and so on) on any macOS version.
 static void addBC250AcceleratorPersonality(OSArray* const array)
 {
@@ -63,7 +63,6 @@ static void addBC250AcceleratorPersonality(OSArray* const array)
         OSSafeReleaseNULL(match);
         array->setObject(copy);
         OSSafeReleaseNULL(copy);
-        BCLOG("DriverInjector", "BC-250: added a copy of the Navi 10 accelerator personality");
         return;
     }
     BCLOG("DriverInjector", "BC-250: no Navi 10 accelerator personality in AMDRadeonX6000");
@@ -71,7 +70,7 @@ static void addBC250AcceleratorPersonality(OSArray* const array)
 
 bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, const bool doNubMatching)
 {
-    if (NRed::singleton().getAttributes().isCyanSkillfish() && BC250::singleton().isHWLSurvey() &&
+    if (NRed::singleton().getAttributes().isCyanSkillfish() && BC250::singleton().isActive() &&
         !singleton().bc250AccelInjected)
     {
         for (UInt32 i = 0; i < array->getCount(); i += 1) {
@@ -95,8 +94,8 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
         if (bundleIdentifier == nullptr || bundleIdentifier->getLength() == 0) { continue; }
 
         Driver* toInject = singleton().bc250Drivers;
-        // Framebuffer with -BC250FB; HWServices too with -BC250HWL (survey, see BC250HWL.cpp).
-        size_t toInjectCount = !BC250::singleton().isFramebufferMode() ? 0 : BC250::singleton().isHWLSurvey() ? 2 : 1;
+        // The framebuffer and HWServices.
+        size_t toInjectCount = BC250::singleton().isActive() ? 2 : 0;
         for (size_t identifierIndex = 0; identifierIndex < toInjectCount; identifierIndex += 1) {
             auto& driver = toInject[identifierIndex];
 

@@ -105,48 +105,6 @@ namespace
     constexpr UInt16 DMU_HWID    = 271;
     constexpr UInt16 MP0_HWID    = 255;
 
-    const char* hwIdName(const UInt16 hwId)
-    {
-        switch (hwId) {
-            case 1: return "MP1";
-            case 2: return "MP2";
-            case 3: return "THM";
-            case 4: return "SMUIO";
-            case 5: return "FUSE";
-            case 6: return "CLKA";
-            case 11: return "GC";
-            case 12: return "VCN";
-            case 14: return "ACP";
-            case 15: return "DCI";
-            case 24: return "IOHC";
-            case 28: return "L2IMU";
-            case 32: return "VCE";
-            case 34: return "MMHUB";
-            case 35: return "ATHUB";
-            case 40: return "OSSSYS";
-            case 41: return "HDP";
-            case 42: return "SDMA0";
-            case 43: return "SDMA1";
-            case 44: return "ISP";
-            case 45: return "DBGU_IO";
-            case 46: return "DF";
-            case 68: return "SDMA2";
-            case 69: return "SDMA3";
-            case 70: return "PCIE";
-            case 80: return "PCS";
-            case 108: return "NBIF";
-            case 150: return "UMC";
-            case 168: return "SATA";
-            case 170: return "USB";
-            case 176: return "CCXSEC";
-            case 200: return "XGMI";
-            case 255: return "MP0";
-            case 271: return "DMU";
-            case 274: return "DAZ";
-            default: return "?";
-        }
-    }
-
     template<typename T>
     bool readAt(const UInt8* const bin, const size_t size, const size_t off, T& out)
     {
@@ -182,17 +140,15 @@ namespace
 void BC250::processPatcher()
 {
     registerSysctls();
-    BCLOG("BC250", "ASRock BC-250 / AMD Cyan Skillfish detected.");
 
-    // Acceleration (the bring-up's survey level 28) is the only mode; -MCOff disables the kext.
-    this->mode = Mode::Framebuffer;
     this->probe();
-    if (this->info.carveOutMiB == 0) {
-        BCLOG("BC250", "Could not read the VRAM carve-out size; leaving the GPU to the firmware framebuffer.");
-        this->mode = Mode::Probe;
+    this->active = this->info.carveOutMiB != 0;
+    if (this->active) {
+        bc250StartPollThread();
     }
-    this->hwlSurvey = this->mode == Mode::Framebuffer;
-    if (this->hwlSurvey) { bc250StartPollThread(); }
+    else {
+        BCLOG("BC250", "Could not read the VRAM carve-out size; leaving the GPU to the firmware framebuffer.");
+    }
 
     // SMU telemetry (read-only messages; bc250smu=0 disables): GPU/CPU clocks, voltages, Tctl, core mask.
     BC250Smu::singleton().start();
@@ -213,19 +169,7 @@ void BC250::probe()
     this->probeDiscovery(dict);
     this->probeVBIOS(dict);
 
-    BCLOG("BC250",
-           "Summary: carve-out %u MiB, BAR0 %llu MiB, GC %u.%u.%u, DCN %u.%u.%u, SDMA x%u, VCN %s, active CUs %u, "
-           "SMU fw %s, VBIOS %s, IP discovery %s.",
-           this->info.carveOutMiB, this->info.bar0Size >> 20, this->info.gcMajor, this->info.gcMinor,
-           this->info.gcRevision, this->info.dcnMajor, this->info.dcnMinor, this->info.dcnRevision,
-           this->info.sdmaCount, this->info.hasVCN ? "present" : "absent", this->info.activeCUs,
-           this->info.smuFirmwareRunning ? "running" : "NOT running", this->info.hasVBIOS ? "found" : "missing",
-           this->info.hasDiscovery ? "found" : "missing");
 
-    if (this->info.gbAddrConfig != 0 && this->info.gbAddrConfig != CyanSkillfish::GB_ADDR_CONFIG_GOLDEN) {
-        BCLOG("BC250", "Note: GB_ADDR_CONFIG 0x%X differs from the GC 10.1.3 golden value 0x%X.",
-               this->info.gbAddrConfig, CyanSkillfish::GB_ADDR_CONFIG_GOLDEN);
-    }
 
     NRed::singleton().getIGPU()->setProperty("BC250,probe", dict);
     dict->release();
@@ -285,18 +229,7 @@ void BC250::probeRegisters(OSDictionary* const dict)
     setNumber(dict, "smu-c2pmsg-82", nred.readReg32(MP1_SMN_C2PMSG_82));
     setNumber(dict, "smu-c2pmsg-90", nred.readReg32(MP1_SMN_C2PMSG_90));
 
-    BCLOG("BC250", "BAR0 0x%llX, BAR5 0x%llX, carve-out %u MiB, strap 0x%X, FB MC 0x%llX-0x%llX, FB offset 0x%llX",
-           this->info.bar0Size, nred.getMMIOLength(), this->info.carveOutMiB, strap, this->info.fbLocationBase,
-           this->info.fbLocationTop, nred.getFbOffset());
-    BCLOG("BC250", "GB_ADDR_CONFIG 0x%X, PSP C2PMSG33/58/81/100 0x%X/0x%X/0x%X/0x%X, SMU flags 0x%X",
-           this->info.gbAddrConfig, psp33, psp58, psp81, psp100, smuFlags);
 
-    if (this->info.carveOutMiB != 0 && this->info.bar0Size != 0
-        && this->info.bar0Size < (static_cast<UInt64>(this->info.carveOutMiB) << 20))
-    {
-        BCLOG("BC250", "Note: BAR0 covers only %llu of %u MiB carve-out; the rest is GPU-only (not CPU-mappable).",
-               this->info.bar0Size >> 20, this->info.carveOutMiB);
-    }
 }
 
 void BC250::probeDiscovery(OSDictionary* const dict)
@@ -352,7 +285,6 @@ void BC250::parseDiscovery(const UInt8* const bin, const size_t size, OSDictiona
         UInt8 flags = 0;
         readAt(bin, size, ipTableOff + 78, flags);
         const bool base64 = ipVer == 4 && (flags & 1) != 0;
-        BCLOG("BC250", "IP discovery v%u.%u, IP table v%u, %u die(s).", verMajor, verMinor, ipVer, numDies);
 
         for (UInt16 d = 0; d < numDies && d < 16; d += 1) {
             UInt16 dieOff = 0, numIps = 0;
@@ -375,8 +307,6 @@ void BC250::parseDiscovery(const UInt8* const bin, const size_t size, OSDictiona
                 // v1/v2: low nibble is the harvest flag (1 = harvested). v3+: sub-revision/variant.
                 const bool harvested = ipVer < 3 && (misc & 0xF) == 1;
 
-                BCLOG("BC250", "  die %u %-7s (hwid %3u) inst %u v%u.%u.%u%s base0 0x%X (%u bases)", d,
-                       hwIdName(hwId), hwId, inst, major, minor, rev, harvested ? " HARVESTED" : "", base0, numBase);
 
                 if (!harvested) {
                     switch (hwId) {
@@ -441,8 +371,6 @@ void BC250::parseDiscovery(const UInt8* const bin, const size_t size, OSDictiona
     readAt(bin, size, gc + 14 * 4, ldsSize);
     readAt(bin, size, gc + 16 * 4, saPerSe);
 
-    BCLOG("BC250", "GC info v%u.%u: SE %u, SA/SE %u, WGP/SA %u+%u, RB/SE %u, GL2C %u, wave %u, LDS %u", gcVerMajor,
-           gcVerMinor, numSe, saPerSe, wgp0PerSa, wgp1PerSa, rbPerSe, gl2c, waveSize, ldsSize);
     setNumber(dict, "gc-num-se", numSe);
     setNumber(dict, "gc-num-sa-per-se", saPerSe);
     setNumber(dict, "gc-num-wgp0-per-sa", wgp0PerSa);
@@ -464,7 +392,6 @@ void BC250::parseDiscovery(const UInt8* const bin, const size_t size, OSDictiona
                  nred.readReg32(CyanSkillfish::GC_USER_SHADER_ARRAY_CONFIG)) >>
                 CyanSkillfish::SHADER_ARRAY_INACTIVE_WGPS_SHIFT;
             const auto active = ~inactive & wgpMask;
-            BCLOG("BC250", "  SE%u SA%u active WGP mask 0x%X", se, sa, active);
             activeWgps += popCount(active);
         }
     }
@@ -495,8 +422,6 @@ void BC250::probeVBIOS(OSDictionary* const dict)
         if (hdr == nullptr || hdr->imageLength == 0) { break; }
         const auto* const content =
             static_cast<const UInt8*>(vfctData->getBytesNoCopy(off + sizeof(GOPVideoBIOSHeader), hdr->imageLength));
-        BCLOG("BC250", "VFCT image: %02X:%02X.%X %04X:%04X, %u bytes", hdr->pciBus, hdr->pciDevice,
-               hdr->pciFunction, hdr->vendorID, hdr->deviceID, hdr->imageLength);
         if (content != nullptr && hdr->vendorID == 0x1002 && hdr->deviceID == NRed::singleton().getDeviceID()) {
             image     = content;
             imageSize = hdr->imageLength;
@@ -520,8 +445,6 @@ void BC250::probeVBIOS(OSDictionary* const dict)
     memcpy(atomSig, &atomSigRaw, sizeof(atomSigRaw));
     readAt(image, imageSize, romHdr + ATOM_ROM_DATA_PTR, mdt);
     readAt(image, imageSize, mdt, mdtSize);
-    BCLOG("BC250", "ATOMBIOS: ROM header 0x%X sig '%s', master data table 0x%X (%u bytes)", romHdr, atomSig, mdt,
-           mdtSize);
 
     // Indices into atom_master_list_of_data_tables_v2_1 that the X6000FB path cares about.
     static constexpr struct
@@ -537,8 +460,6 @@ void BC250::probeVBIOS(OSDictionary* const dict)
         readAt(image, imageSize, mdt + sizeof(ATOMCommonTableHeader) + t.index * 2, tableOff);
         ATOMCommonTableHeader hdr {};
         if (tableOff != 0) { readAt(image, imageSize, tableOff, hdr); }
-        BCLOG("BC250", "  %-22s @ 0x%04X v%u.%u (%u bytes)", t.name, tableOff, hdr.formatRev, hdr.contentRev,
-               hdr.structureSize);
         char key[48];
         snprintf(key, sizeof(key), "atom-%s", t.name);
         setNumber(dict, key, (static_cast<UInt32>(tableOff) << 16) | (hdr.formatRev << 8) | hdr.contentRev);

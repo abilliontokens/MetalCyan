@@ -19,14 +19,6 @@ void bc250LogAppend(const char* module, const char* format, ...) __attribute__((
 class BC250
 {
 public:
-    enum class Mode : UInt8
-    {
-        // Default: read-only hardware probe, nothing is injected or patched. macOS keeps the GOP framebuffer.
-        Probe,
-        // `-BC250FB`: experimental framebuffer-only bring-up through AMDRadeonX6000Framebuffer.
-        Framebuffer,
-    };
-
     // What the probe learnt about the board. Zero means "unknown".
     struct Info
     {
@@ -47,19 +39,17 @@ public:
 
     static BC250& singleton();
 
-    Mode        getMode() const { return this->mode; }
     const Info& getInfo() const { return this->info; }
-    bool        isFramebufferMode() const { return this->mode == Mode::Framebuffer; }
-    // `-BC250HWL` (with -BC250FB): load HWServices/HWLibs and log them, without starting any engine.
-    bool        isHWLSurvey() const { return this->hwlSurvey; }
+    // The probe read the board: the AMD kexts are injected and patched for it. Otherwise nothing is, and macOS keeps
+    // the firmware framebuffer.
+    bool        isActive() const { return this->active; }
 
     // Called by NRed once the device has been identified as Cyan Skillfish.
     void processPatcher();
 
 private:
-    Mode mode{Mode::Probe};
-    bool   hwlSurvey{false};
-    Info   info{};
+    bool active{false};
+    Info info{};
 
     void probe();
     void probeRegisters(OSDictionary* dict);

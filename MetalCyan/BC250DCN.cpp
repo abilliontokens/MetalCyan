@@ -26,9 +26,8 @@ namespace
     constexpr UInt32 DENTIST_DPPCLK_CHG_DONE             = 1U << 20;
     constexpr UInt32 DENTIST_DID_MIN                     = 0x0A;    // Divider 2.5, what the GOP runs at.
     constexpr UInt32 DENTIST_DID_MAX                     = 0x7E;    // 0x7F is special (bypass); left alone.
-    // CLK4 (clk_11_0_1_offset.h, CLK base 0x16C00): the DENTIST VCO and DPREFCLK, as dcn201_clk_mgr reads them.
+    // CLK4 (clk_11_0_1_offset.h, CLK base 0x16C00): the DENTIST VCO, as dcn201_clk_mgr reads it.
     constexpr UInt32 CLK4_CLK_PLL_REQ                    = 0x16C00 + 0x460E;
-    constexpr UInt32 CLK4_CLK2_CURRENT_CNT               = 0x16C00 + 0x467F;
 
     constexpr size_t PLANE_SCAN_BYTES  = 0x200;
     constexpr size_t CURSOR_SCAN_BYTES = 0x80;
@@ -80,16 +79,6 @@ namespace
     }
 }    // namespace
 
-SYSCTL_DECL(_debug_bc250);
-SYSCTL_UINT(_debug_bc250, OID_AUTO, addrfixes, CTLFLAG_RD | CTLFLAG_LOCKED, &moduleInstance.addressFixes, 0,
-            "scanout addresses translated to UMA");
-SYSCTL_UINT(_debug_bc250, OID_AUTO, clockfixes, CTLFLAG_RD | CTLFLAG_LOCKED, &moduleInstance.clockFixes, 0,
-            "DENTIST divider corrections");
-SYSCTL_UINT(_debug_bc250, OID_AUTO, piperemaps, CTLFLAG_RD | CTLFLAG_LOCKED, &moduleInstance.pipeRemaps, 0,
-            "MPC split pipes moved from 4/5 to 2/3");
-SYSCTL_UINT(_debug_bc250, OID_AUTO, vcokhz, CTLFLAG_RD | CTLFLAG_LOCKED, &moduleInstance.vcoKHz, 0,
-            "DENTIST VCO in kHz");
-
 void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
 {
     auto& nred = NRed::singleton();
@@ -97,12 +86,6 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
     this->fbBase   = static_cast<UInt64>(nred.readReg32(GCMC_VM_FB_LOCATION_BASE) & 0xFFFFFF) << 24;
     this->fbTop    = static_cast<UInt64>((nred.readReg32(GCMC_VM_FB_LOCATION_TOP) & 0xFFFFFF) + 1) << 24;
     this->fbOffset = static_cast<UInt64>(nred.readReg32(GCMC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
-    BCLOG("BC250DCN", "FB MC 0x%llX-0x%llX is system 0x%llX", this->fbBase, this->fbTop, this->fbOffset);
-
-    sysctl_register_oid(&sysctl__debug_bc250_addrfixes);
-    sysctl_register_oid(&sysctl__debug_bc250_clockfixes);
-    sysctl_register_oid(&sysctl__debug_bc250_piperemaps);
-    sysctl_register_oid(&sysctl__debug_bc250_vcokhz);
 
     // 1. Scanout addresses. Each hook is optional: a missing one is logged, not fatal.
     KernelPatcher::RouteRequest requests[] = {
@@ -113,8 +96,6 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             wrapUpdateSurfaceInfo, this->orgUpdateSurfaceInfo},
         {"__ZN27AMDRadeonX6000_AmdDalHelper14setCursorImageEPK21AmdFbCursorDescriptor", wrapSetCursorImage,
             this->orgSetCursorImage},
-        {"__ZN27AMDRadeonX6000_AmdDalHelper22dalGetRegistryPropertyEPvPKcS0_m", wrapGetRegistryProperty,
-            this->orgGetRegistryProperty},
     };
     for (auto& request : requests) {
         if (!patcher.routeMultiple(id, &request, 1, slide, size)) {
@@ -143,9 +124,6 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             BCLOG("BC250DCN", "dcn20_validate_apply_pipe_split_flags not routed; splits may use missing pipes");
             patcher.clearError();
         }
-        else {
-            BCLOG("BC250DCN", "dcn20_validate_apply_pipe_split_flags at 0x%llX routed", fn);
-        }
     }
 
     // 2. DENTIST VCO, as dcn201_clk_mgr_construct reads it (FbMult in units of 100 MHz).
@@ -163,8 +141,6 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         this->vcoKHz = 2670000;
     }
     PE_parse_boot_argn("bc250applevco", &this->appleVcoKHz, sizeof(this->appleVcoKHz));
-    BCLOG("BC250DCN", "DENTIST VCO %u kHz (CLK4_CLK_PLL_REQ 0x%X), DPREFCLK %u kHz, DAL assumes %u kHz",
-        this->vcoKHz, pllReq, nred.readReg32(CLK4_CLK2_CURRENT_CNT) * 100, this->appleVcoKHz);
     if (checkKernelArgument("-BC250NoClockFix")) {
         BCLOG("BC250DCN", "DENTIST watcher disabled by -BC250NoClockFix");
     }
@@ -184,7 +160,7 @@ bool BC250DCN::toUMA(UInt64& addr) const
 
 // Rewrites every 8-byte aligned MC carve-out address in [base, base + length). The range 0xF400000000+ is
 // distinctive enough that nothing but an address lands in it. Optionally records originals for restoreWindow.
-size_t BC250DCN::translateWindow(void* base, size_t length, const char* who, UInt64* saved, size_t* savedOff,
+size_t BC250DCN::translateWindow(void* base, size_t length, UInt64* saved, size_t* savedOff,
     size_t maxSaved)
 {
     if (base == nullptr) { return 0; }
@@ -198,12 +174,8 @@ size_t BC250DCN::translateWindow(void* base, size_t length, const char* who, UIn
             saved[count]    = words[i];
             savedOff[count] = i;
         }
-        if (this->addressFixes < 8) {
-            BCLOG("BC250DCN", "%s: +0x%zX 0x%llX -> 0x%llX", who, i * sizeof(UInt64), words[i], value);
-        }
         words[i] = value;
         count += 1;
-        this->addressFixes += 1;
     }
     return count;
 }
@@ -218,7 +190,7 @@ UInt64 BC250DCN::wrapPrepareSurface(void* self, const void* displayPath, void* p
 {
     auto&      s   = singleton();
     const auto ret = FunctionCast(wrapPrepareSurface, s.orgPrepareSurface)(self, displayPath, plane);
-    s.translateWindow(plane, PLANE_SCAN_BYTES, "prepareSurface", nullptr, nullptr, 0);
+    s.translateWindow(plane, PLANE_SCAN_BYTES, nullptr, nullptr, 0);
     return ret;
 }
 
@@ -228,7 +200,7 @@ UInt64 BC250DCN::wrapUpdateSurfaceInfo(void* self, const void* plane, const void
     UInt64 saved[MAX_SAVED];
     size_t off[MAX_SAVED];
     auto*  mutablePlane = const_cast<void*>(plane);
-    const auto n        = s.translateWindow(mutablePlane, PLANE_SCAN_BYTES, "updateSurfaceInfo", saved, off, MAX_SAVED);
+    const auto n        = s.translateWindow(mutablePlane, PLANE_SCAN_BYTES, saved, off, MAX_SAVED);
     const auto ret      = FunctionCast(wrapUpdateSurfaceInfo, s.orgUpdateSurfaceInfo)(self, plane, displayPath);
     s.restoreWindow(mutablePlane, saved, off, n);
     return ret;
@@ -240,34 +212,9 @@ UInt64 BC250DCN::wrapSetCursorImage(void* self, const void* cursor)
     UInt64 saved[MAX_SAVED];
     size_t off[MAX_SAVED];
     auto*  mutableCursor = const_cast<void*>(cursor);
-    const auto n = s.translateWindow(mutableCursor, CURSOR_SCAN_BYTES, "setCursorImage", saved, off, MAX_SAVED);
+    const auto n = s.translateWindow(mutableCursor, CURSOR_SCAN_BYTES, saved, off, MAX_SAVED);
     const auto ret = FunctionCast(wrapSetCursorImage, s.orgSetCursorImage)(self, cursor);
     s.restoreWindow(mutableCursor, saved, off, n);
-    return ret;
-}
-
-// Logs the DAL's option names once each, to find its pipe split/clock knobs. The key is only read if it looks
-// like a C string, in case the callback's arguments are laid out differently than assumed.
-UInt64 BC250DCN::wrapGetRegistryProperty(void* ctx, const char* key, void* value, size_t size)
-{
-    const auto ret = FunctionCast(wrapGetRegistryProperty, singleton().orgGetRegistryProperty)(ctx, key, value, size);
-    static UInt32 logged = 0;
-    if (logged < 96 && reinterpret_cast<UInt64>(key) >= 0xFFFFFF8000000000ULL) {
-        bool printable = true;
-        size_t len     = 0;
-        for (; len < 64 && key[len] != '\0'; len++) {
-            if (key[len] < 0x20 || key[len] > 0x7E) {
-                printable = false;
-                break;
-            }
-        }
-        if (printable && len > 0 && len < 64) {
-            UInt32 first = 0;
-            if (value != nullptr && size >= sizeof(first)) { memcpy(&first, value, sizeof(first)); }
-            BCLOG("BC250DCN", "DAL option '%s' (size %zu) -> ret 0x%llX, value 0x%X", key, size, ret, first);
-            logged += 1;
-        }
-    }
     return ret;
 }
 
@@ -282,7 +229,6 @@ int BC250DCN::wrapApplyPipeSplitFlags(void* dc, void* context, int vlevel, int* 
         for (size_t i = 0; i < MAX_PIPES; i++) {
             if (split[i] != 0) {
                 split[i] = 0;
-                s.pipeRemaps += 1;
             }
         }
     }
@@ -303,13 +249,10 @@ void* BC250DCN::wrapFindSecondaryPipe(void* dc, void* resCtx, const void* pool, 
             return ret;
         }
         s.pipeCtxSize = delta / 5;
-        BCLOG("BC250DCN", "pipe_ctx size 0x%zX", s.pipeCtxSize);
     }
     if (delta % s.pipeCtxSize != 0) { return ret; }
     const auto index = delta / s.pipeCtxSize;
     if (index < 4 || index > 5) { return ret; }
-    s.pipeRemaps += 1;
-    if (s.pipeRemaps <= 4) { BCLOG("BC250DCN", "MPC split: pipe %zu -> pipe %zu", index, index - 2); }
     return static_cast<UInt8*>(resCtx) + (index - 2) * s.pipeCtxSize;
 }
 
@@ -359,8 +302,6 @@ void BC250DCN::clockTick()
     this->lastDispDid = newDisp;
     this->lastDppDid  = newDpp;
     if (newDisp != disp || newDpp != dpp) {
-        this->clockFixes += 1;
-        BCLOG("BC250DCN", "DENTIST DID disp 0x%X -> 0x%X, dpp 0x%X -> 0x%X", disp, newDisp, dpp, newDpp);
     }
 }
 

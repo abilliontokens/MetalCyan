@@ -121,12 +121,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
 {
     if (kextRadeonX6000Framebuffer.loadIndex != id) { return; }
 
-    if (BC250::singleton().isFramebufferMode()) {
-        this->processKextCyanSkillfish(patcher, id, slide, size);
-    }
-    else {
-        BCLOG("X6000FB", "BC-250 in probe mode: leaving AMDRadeonX6000Framebuffer untouched.");
-    }
+    if (BC250::singleton().isActive()) { this->processKextCyanSkillfish(patcher, id, slide, size); }
 }
 
 UInt16 X6000FB::getEnumeratedRevision() { return NRed::singleton().getEnumRevision(); }
@@ -170,8 +165,6 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
-    BCLOG("X6000FB", "Controller::powerUp(%p) <<< 0x%X, flags 0x%X (ControllerEnabled %s)", self, ret, m_flags,
-        send ? "sent" : "not sent: already powered up");
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     return ret;
 }
@@ -405,8 +398,6 @@ static mach_vm_address_t solveCreatePspDirectoryBC250(KernelPatcher& patcher, co
         const auto target =
             static_cast<mach_vm_address_t>(static_cast<SInt64>(site + 5) + static_cast<SInt64>(rel));
         const auto distance = target > slide ? target - slide : slide - target;
-        BCLOG("X6000FB", "BC-250: createPspDirectory call at 0x%llX -> 0x%llX (kext 0x%llX+0x%zX, caller 0x%llX)",
-               site, target, slide, size, caller);
         if (distance >= kMaxDistance) {
             BCLOG("X6000FB", "BC-250: createPspDirectory target is 0x%llX bytes from the kext, rejecting", distance);
             continue;
@@ -422,7 +413,6 @@ static mach_vm_address_t solveCreatePspDirectoryBC250(KernelPatcher& patcher, co
 
 void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size)
 {
-    BCLOG("X6000FB", "BC-250: applying experimental framebuffer patches.");
 
     NRed::singleton().hwLateInit();
 
@@ -459,13 +449,11 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
         }
     }
     PANIC_COND(naviEntry == nullptr, "X6000FB", "BC-250: No Navi entry in CAIL_ASIC_CAPS_TABLE");
-    BCLOG("X6000FB", "BC-250: using DDI caps of Navi device 0x%X", naviEntry->deviceId);
     memcpy(bc250DdiCaps, naviEntry->ddiCaps, sizeof(bc250DdiCaps));
     // Experiment lever: tell the DAL the device is an APU. Off by default: Linux scans out from the carve-out
     // (`sg_display=0`) on this chip, which is the dGPU-style behaviour Navi 10's caps already describe.
     if (checkKernelArgument("-BC250APUCap")) {
         bc250DdiCaps[DDI_CAP_APU / 32] |= getBit<UInt32>(DDI_CAP_APU % 32);
-        BCLOG("X6000FB", "BC-250: DDI APU cap set (-BC250APUCap).");
     }
 
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "X6000FB",
@@ -482,9 +470,6 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
           .skeleton    = skeleton,
     };
     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-    BCLOG("X6000FB", "BC-250: CAIL caps entry set (device 0x%X rev 0x%X ext 0x%X)", NRed::singleton().getDeviceID(),
-           NRed::singleton().getDevRevision(),
-           NRed::singleton().getEnumRevision() + NRed::singleton().getDevRevision());
 
     if (checkKernelArgument("-NRedDPDelay")) {
         if (currentKernelVersion() >= MACOS_14_4) {
@@ -600,12 +585,6 @@ void X6000FB::processKextCyanSkillfish(KernelPatcher& patcher, size_t id, mach_v
                "X6000FB", "Failed to apply createLinks patch");
 
     // DCN 2.0.1 quirks: UMA scanout addresses, DENTIST VCO, 4 pipes. Soft-fails per quirk.
-    if (checkKernelArgument("-BC250NoDCNQuirks")) {
-        BCLOG("X6000FB", "BC-250: DCN 2.0.1 quirks disabled by -BC250NoDCNQuirks.");
-    }
-    else {
-        BC250DCN::singleton().processKext(patcher, id, slide, size);
-    }
+    if (!checkKernelArgument("-BC250NoDCNQuirks")) { BC250DCN::singleton().processKext(patcher, id, slide, size); }
 
-    BCLOG("X6000FB", "BC-250: framebuffer patches applied.");
 }
