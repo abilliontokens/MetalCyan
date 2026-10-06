@@ -81,6 +81,11 @@ reduced-blanking mode, otherwise macOS won't list it and an EDID override is nee
 `bc250dispmhz` takes effect at boot, so a bad value is reverted by removing the arg in the OpenCore picker or
 config.
 
+DP to HDMI 2.1 adapters don't get around this: the BC-250 still has to send the picture over its DP 1.4 link,
+and HDMI TVs expect the CTA timing (1188 MHz). Without DSC that only fits as YCbCr 4:2:0, and one pipe at 1188 MHz
+needs a VCO of about 3.0 GHz (at 2.67 GHz the steps are 1068 and 1187 MHz). Whether Apple's driver drives 4:2:0
+through such an adapter is untested.
+
 ## Logs
 
 - `sysctl -n debug.bc250.log`: MetalCyan's own log since boot. Only errors and warnings, plus the SMU tuning lines.
