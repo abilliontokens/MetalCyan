@@ -71,20 +71,25 @@ clock), remove the setting and power off for 10 seconds. A restart isn't enough.
 
 ## 4K at 120 Hz
 
-Untested. The BC-250's one DisplayPort 1.4 output carries 4K at 120 Hz only at 8-bit colour with a
-reduced-blanking (CVT-RB2) timing, about 1076 MHz pixel clock. DCN 2.0.1 has no DSC, so 10-bit 4K at 120 Hz is
-impossible, and CTA timings (1188 MHz) don't fit the link. MetalCyan keeps each display on one pipe, so the
-display clock has to carry the whole pixel rate: check `sysctl -n debug.bc250.log` for the `DENTIST VCO` line,
-and if the ceiling is below ~1080 MHz add `bc250dispmhz=1200`. The monitor's EDID must offer a 4K 120 Hz
-reduced-blanking mode, otherwise macOS won't list it and an EDID override is needed. Use a certified DP 1.4
-(HBR3) cable. If the screen goes black, remove the arg (or boot with -MCOff). Unlike the SMU settings above,
-`bc250dispmhz` takes effect at boot, so a bad value is reverted by removing the arg in the OpenCore picker or
-config.
+Untested. Without compression, the BC-250's one DisplayPort 1.4 output carries 4K at 120 Hz only at 8-bit colour
+with a reduced-blanking (CVT-RB2) timing, about 1076 MHz pixel clock; CTA timings (1188 MHz) and 10-bit don't fit
+the link. MetalCyan keeps each display on one pipe, so the display clock has to carry the whole pixel rate: check
+`sysctl -n debug.bc250.log` for the `DENTIST VCO` line, and if the ceiling is below ~1080 MHz add
+`bc250dispmhz=1200`. The monitor's EDID must offer a 4K 120 Hz reduced-blanking mode, otherwise macOS won't list
+it and an EDID override is needed. Use a certified DP 1.4 (HBR3) cable. If the screen goes black, remove the arg
+(or boot with -MCOff). Unlike the SMU settings above, `bc250dispmhz` takes effect at boot, so a bad value is
+reverted by removing the arg in the OpenCore picker or config.
 
-DP to HDMI 2.1 adapters don't get around this: the BC-250 still has to send the picture over its DP 1.4 link,
-and HDMI TVs expect the CTA timing (1188 MHz). Without DSC that only fits as YCbCr 4:2:0, and one pipe at 1188 MHz
-needs a VCO of about 3.0 GHz (at 2.67 GHz the steps are 1068 and 1187 MHz). Whether Apple's driver drives 4:2:0
-through such an adapter is untested.
+DSC: Linux's DCN 2.0.1 driver claims no DSC engines, but the chip has two at Navi 10's DSC0/DSC1 addresses. The
+[linux-cachyos-bc250](https://github.com/MastaG/linux-cachyos-bc250) `0010-dcn201-enable-dsc` patch turns them on
+and runs 4K 120 Hz RGB with DSC into a DP to HDMI 2.1 adapter. Whether Apple's Navi 10 driver uses them on the
+BC-250 is untested.
+
+DP to HDMI 2.1 adapters: the picture still crosses the BC-250's DP 1.4 link, and HDMI TVs expect the CTA timing
+(1188 MHz). That needs DSC (the adapter must advertise it; the Cable Matters 102101 / VMM7100 on firmware 7.02.120
+reports none, and its firmware updater runs on any Windows PC with the adapter plugged in) or YCbCr 4:2:0. Either way
+one pipe at 1188 MHz needs a VCO of about 3.0 GHz (at 2.67 GHz the steps are 1068 and 1187 MHz). Untested on
+macOS.
 
 ## Logs
 
