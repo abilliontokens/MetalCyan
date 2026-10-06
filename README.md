@@ -82,14 +82,15 @@ reverted by removing the arg in the OpenCore picker or config.
 
 DSC: Linux's DCN 2.0.1 driver claims no DSC engines, but the chip has two at Navi 10's DSC0/DSC1 addresses. The
 [linux-cachyos-bc250](https://github.com/MastaG/linux-cachyos-bc250) `0010-dcn201-enable-dsc` patch turns them on
-and runs 4K 120 Hz RGB with DSC into a DP to HDMI 2.1 adapter. Whether Apple's Navi 10 driver uses them on the
-BC-250 is untested.
+and runs 4K 120 Hz RGB with DSC into a DP to HDMI 2.1 adapter. Apple's Navi 10 display code (26.7.1) always creates
+six DSC engines at Navi 10's addresses, so DSC0/DSC1 land on the real ones; whether it uses them on the BC-250 is
+untested.
 
 DP to HDMI 2.1 adapters: the picture still crosses the BC-250's DP 1.4 link, and HDMI TVs expect the CTA timing
 (1188 MHz). That needs DSC (the adapter must advertise it; the Cable Matters 102101 / VMM7100 on firmware 7.02.120
 reports none, and its firmware updater runs on any Windows PC with the adapter plugged in) or YCbCr 4:2:0. Either way
-one pipe at 1188 MHz needs a VCO of about 3.0 GHz (at 2.67 GHz the steps are 1068 and 1187 MHz). Untested on
-macOS.
+the display clock at 1188 MHz needs a VCO of about 3.0 GHz (at 2.67 GHz the steps are 1068 and 1187 MHz). Apple's
+display code has the YCbCr 4:2:0 and DP to HDMI 2.1 (FRL) adapter paths; untested on the BC-250.
 
 ## Logs
 
