@@ -525,19 +525,22 @@ namespace
         if (function == kControllerReleaseServices && accelInStart) { return kIOReturnSuccess; }
         return FunctionCast(wrapControllerDrvrFunction, orgControllerDrvrFunction)(controller, function, p1, p2, p3);
     }
-    // Shutdown/restart panics in IOAccelDisplayMachine::display_mode_did_change when this returns false (26.7.1:
-    // its only false source is set_display_mode_and_vram's scanout VRAM allocation failing, which already calls
-    // resetTempBuffersAndVblankFlips). Retry once; success path unchanged. Untested.
+    // Every shutdown/restart panicked in IOAccelDisplayMachine::display_mode_did_change ("AMDRadeonAccelerator driver
+    // returns false", WindowServer, "System shutdown begun: YES"). On the way down WindowServer's last mode change
+    // reaches AMDAccelDisplayMachine::displayModeDidChange, whose only false source (26.7.1) is
+    // set_display_mode_and_vram failing to place a display pipe's scanout VRAM, after its own evict-and-retry; a
+    // second call fails the same way. While the kernel is shutting down (IOPMRootDomainGetWillShutdown, the flag the
+    // panic report prints) that failure is reported as done: nothing scans out any more. At any other time the
+    // result is Apple's.
     mach_vm_address_t orgDisplayModeDidChange = 0;
+    bool (*rootDomainWillShutdown)()          = nullptr;
 
     bool wrapDisplayModeDidChange(void* self)
     {
-        bool ret = FunctionCast(wrapDisplayModeDidChange, orgDisplayModeDidChange)(self);
-        if (ret) { return ret; }
-        BCLOG("BC250HWL", "displayModeDidChange failed (scanout VRAM); retrying once");
-        ret = FunctionCast(wrapDisplayModeDidChange, orgDisplayModeDidChange)(self);
-        BCLOG("BC250HWL", "displayModeDidChange retry: %d", ret);
-        return ret;
+        const bool ret = FunctionCast(wrapDisplayModeDidChange, orgDisplayModeDidChange)(self);
+        if (ret || rootDomainWillShutdown == nullptr || !rootDomainWillShutdown()) { return ret; }
+        BCLOG("BC250HWL", "displayModeDidChange failed during shutdown (scanout VRAM); reported done, no panic");
+        return true;
     }
 
     // GPU statistics for the usual monitoring tools (Activity Monitor, iStat, HWMonitor), which read the
@@ -3042,10 +3045,14 @@ void BC250HWL::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
         }
     }
     if (kext == Kext::Accel) {
+        rootDomainWillShutdown = reinterpret_cast<bool (*)()>(
+            patcher.solveSymbol(KernelPatcher::KernelID, "_IOPMRootDomainGetWillShutdown"));
         KernelPatcher::RouteRequest request {"__ZN37AMDRadeonX6000_AMDAccelDisplayMachine20displayModeDidChangeEv",
             wrapDisplayModeDidChange, orgDisplayModeDidChange};
-        if (!patcher.routeMultiple(id, &request, 1, slide, size) || orgDisplayModeDidChange == 0) {
-            BCLOG("BC250HWL", "displayModeDidChange retry not installed; shutdown panic unchanged");
+        if (rootDomainWillShutdown == nullptr || !patcher.routeMultiple(id, &request, 1, slide, size) ||
+            orgDisplayModeDidChange == 0)
+        {
+            BCLOG("BC250HWL", "displayModeDidChange shutdown guard not installed; shutdown still panics");
             patcher.clearError();
         }
     }
