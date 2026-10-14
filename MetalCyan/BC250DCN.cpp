@@ -40,6 +40,12 @@ namespace
     // DENTIST divider IDs in quarter steps (dcn20_clk_mgr.c ranges 1 and 2; the 7-bit field never reaches 3).
     UInt32 didToDiv4(UInt32 did) { return did < 64 ? did : 64 + (did - 64) * 2; }
     UInt32 div4ToDid(UInt32 div4) { return div4 < 64 ? div4 : 64 + (div4 - 64) / 2; }
+    // The clock a DID gives off `vcoKHz` (DID in quarter steps), in MHz; 0 for a DID with no divider.
+    UInt32 didToMHz(UInt32 vcoKHz, UInt32 did)
+    {
+        const auto div4 = didToDiv4(did);
+        return div4 == 0 ? 0 : vcoKHz * 4 / div4 / 1000;
+    }
 
     // Finds the function that references `str` with a RIP-relative LEA, by walking back to its prologue. Every
     // reference has to resolve to the same function, otherwise nothing is returned.
@@ -122,6 +128,8 @@ void BC250DCN::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t 
             pllReq);
         this->vcoKHz = 2670000;
     }
+    BCLOG("BC250DCN", "DENTIST VCO %u kHz (CLK4_CLK_PLL_REQ 0x%X), DAL assumes %u kHz", this->vcoKHz, pllReq,
+        this->appleVcoKHz);
     this->startClockWatcher();
 }
 
@@ -254,10 +262,17 @@ void BC250DCN::clockTick()
             IODelay(10);
         }
     }
+    // Logged only when a divider moved; at steady state the early return above keeps this silent.
+    if (disp != this->lastDispDid || newDisp != disp) {
+        BCLOG("BC250DCN", "DENTIST DISPCLK DID 0x%X (was 0x%X) -> 0x%X: DAL %u MHz -> actual %u MHz", disp,
+            this->lastDispDid, newDisp, didToMHz(this->appleVcoKHz, disp), didToMHz(this->vcoKHz, newDisp));
+    }
+    if (dpp != this->lastDppDid || newDpp != dpp) {
+        BCLOG("BC250DCN", "DENTIST DPPCLK DID 0x%X (was 0x%X) -> 0x%X: DAL %u MHz -> actual %u MHz", dpp,
+            this->lastDppDid, newDpp, didToMHz(this->appleVcoKHz, dpp), didToMHz(this->vcoKHz, newDpp));
+    }
     this->lastDispDid = newDisp;
     this->lastDppDid  = newDpp;
-    if (newDisp != disp || newDpp != dpp) {
-    }
 }
 
 void BC250DCN::clockWatcherMain(void*, int)
