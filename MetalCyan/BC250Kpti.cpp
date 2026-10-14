@@ -188,4 +188,9 @@ void BC250Kpti::processPatcher(KernelPatcher& patcher)
     available = true;
     sysctl_register_oid(&sysctl__debug_bc250_kpti);
     BCLOG("BC250KPTI", "CR3 swaps at %#lx (return) and %#lx (entry); sysctl debug.bc250.kpti", retAddr, entryAddr);
+    UInt32 bootLevel = 0;
+    if (PE_parse_boot_argn("bc250kpti", &bootLevel, sizeof(bootLevel)) && bootLevel >= 1 && bootLevel <= 2) {
+        if (applyState(1) && bootLevel == 2) { applyState(2); }
+        BCLOG("BC250KPTI", "bc250kpti=%u: level %d", bootLevel, level);
+    }
 }
