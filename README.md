@@ -30,8 +30,9 @@ For a complete EFI, see [BC-250-Hackintosh-OpenCore](https://github.com/amethyst
   freezes until you reboot. It hasn't happened since the VRAM fixes, but there's no way back from it.
 - **Shutdown/restart.** WindowServer's last display-mode change on the way down can fail (Apple's scanout VRAM
   reservation, after its own evict-and-retry), which panicked (`display_mode_did_change ... returns false`). Once
-  shutdown has begun, MetalCyan reports that failure as done instead; the system log shows `reported done, no panic`
-  when it happens.
+  shutdown has begun, MetalCyan reports that failure as done instead; the durable sign it fired is no new kernel
+  panic report in `/Library/Logs/DiagnosticReports/*.panic`. the `reported done, no panic` line lives in the
+  in-memory `debug.bc250.log` ring, so it is only visible if the buffer is read before the reboot completes.
 - **Sleep.** Not tested.
 
 ## Requirements
