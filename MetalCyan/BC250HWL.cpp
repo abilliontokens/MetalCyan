@@ -129,7 +129,7 @@ namespace
     // SDMA1's events, notified with every other IRQMgr dispatch (below) and from a timer (bug 4: while the display is
     // idle or being reprogrammed there is no V_UPDATE, so SDMA1's finished work waited for IOAccel's 5 s progress
     // check: slow lock screen, mode sets, boot). The timer checks the SDMA1 channels (the callbacks' owners) for
-    // submitted-but-unseen work every 10 ms, every 1 ms while there is. It runs on a workloop of its own: on the
+    // submitted-but-unseen work every 10 ms at first (backing off while idle, below), every 1 ms while there is. It runs on a workloop of its own: on the
     // framebuffer's, it could not fire while the display bring-up waited on SDMA1 holding that workloop's gate (a
     // 12 s stall at boot); IRQMgr itself dispatches from several threads.
     // Bug 5: that still saw a finished job on SDMA1's page queue 0.5-8 ms late, and every page-table update goes there
@@ -138,11 +138,19 @@ namespace
     // one's kernel paging work and ten page-table jobs take most of that). Each submission to an SDMA1 channel
     // (AMDHWChannel::submitCommandBuffer; AMDDMAHWChannel's calls it through the base vtable) now schedules a
     // poll 50 us out, repeated every 100 us while SDMA1 has unseen work, until 2 ms pass without any of it completing
-    // (a burst of page-table jobs keeps it going; one stuck job falls back to the timer's 1 ms). The poll is a thread
+    // (a burst of page-table jobs keeps it going; one stuck job falls back to this poll's own 1 ms, below). The poll is a thread
     // call of its own: arming the timer from the submitting threads raced its own re-arm (IOTimerEventSource::wakeAtTime
     // increments calloutGeneration unlocked, which can leave the pending callout with a stale generation whose action
     // never runs), and in some boots the timer stopped firing for good.
+    // The timer is only a backstop, so it backs off while nothing is pending: new SDMA1 work announces itself (a
+    // submission arms the fast poll; any other IRQMgr dispatch kicks too), and a job that outlives the fast poll's
+    // 2 ms is kept at the timer's 1 ms by that poll itself instead of stopping, so where the timer is in its idle
+    // sleep can never delay a completion. While the timer itself sees work it keeps its 1 ms, exactly as before;
+    // only its nothing-pending interval grows, 10 ms doubling to 100 ms (at idle that was 100 wakeups a second to
+    // walk the registration table and find nothing). Without the fast poll (its allocation failure is logged) a
+    // completion can wait out one backed-off interval at worst, still far under IOAccel's 5 s progress check.
     constexpr UInt32    kSdma1SubmitDelayUs = 50, kSdma1FastPollUs = 100, kSdma1FastPolls = 20;
+    constexpr UInt32    kSdma1SlowPollUs = 1000, kSdma1TimerIdleUs = 10000, kSdma1TimerIdleMaxUs = 100000;
     mach_vm_address_t   sdma1NotifyOrg = 0;
     volatile UInt32     sdma1KickBusy  = 0;
     IOTimerEventSource* sdma1Timer     = nullptr;
@@ -151,6 +159,7 @@ namespace
     volatile UInt32     sdma1FastArmed = 0;    // A poll is scheduled, or about to be.
     UInt32              sdma1FastPolls = 0;    // Polls without progress; this and sdma1LastSeen are the thread call's.
     UInt32              sdma1LastSeen  = 0;    // Sum of the SDMA1 channels' last-seen stamps at the last poll.
+    UInt32              sdma1TimerIdleUs = kSdma1TimerIdleUs;    // Current idle interval; the timer's own.
 
     bool sdma1IsChannel(void* channel)
     {
@@ -226,17 +235,34 @@ namespace
             sdma1LastSeen  = seen;
             sdma1FastPolls = 0;
         }
-        if (sdma1Pending() && sdma1FastPolls < kSdma1FastPolls && OSCompareAndSwap(0, 1, &sdma1FastArmed)) {
-            sdma1FastPolls += 1;
-            sdma1FastArm(kSdma1FastPollUs);
+        const bool pending = sdma1Pending();
+        if (pending && OSCompareAndSwap(0, 1, &sdma1FastArmed)) {
+            if (sdma1FastPolls < kSdma1FastPolls) {
+                sdma1FastPolls += 1;
+                sdma1FastArm(kSdma1FastPollUs);
+            }
+            else {
+                // Past the fast window the timer's 1 ms cadence is enough, but this poll keeps it: the timer may
+                // be anywhere in its backed-off idle sleep (above), and this work must not wait for it.
+                sdma1FastArm(kSdma1SlowPollUs);
+            }
         }
     }
 
     void sdma1TimerFired(OSObject*, IOTimerEventSource* timer)
     {
         const bool pending = sdma1Pending();
-        if (pending) { sdma1Kick(0, nullptr, nullptr); }
-        timer->setTimeoutUS(pending ? 1000 : 10000);
+        if (pending) {
+            sdma1Kick(0, nullptr, nullptr);
+            sdma1TimerIdleUs = kSdma1TimerIdleUs;
+            timer->setTimeoutUS(1000);
+            return;
+        }
+        timer->setTimeoutUS(sdma1TimerIdleUs);
+        if (sdma1TimerIdleUs < kSdma1TimerIdleMaxUs) {
+            sdma1TimerIdleUs *= 2;
+            if (sdma1TimerIdleUs > kSdma1TimerIdleMaxUs) { sdma1TimerIdleUs = kSdma1TimerIdleMaxUs; }
+        }
     }
 
     mach_vm_address_t orgHwChannelSubmit = 0;
